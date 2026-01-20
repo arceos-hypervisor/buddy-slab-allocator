@@ -9,9 +9,97 @@ use log::{debug, warn};
 /// Maximum number of buddy blocks in a single contiguous allocation
 const MAX_PARTS_PER_ALLOC: usize = 8;
 
+/// Maximum number of concurrent composite allocations tracked
+const MAX_COMPOSITE_ALLOCS: usize = 16;
+
+/// Metadata for a composite allocation (multiple buddy blocks combined)
+#[derive(Clone, Copy, Debug)]
+struct CompositeBlockInfo {
+    /// Base address of the composite allocation
+    base_addr: usize,
+    /// Number of parts in this composite allocation
+    part_count: u8,
+    /// Individual parts: (address, order)
+    parts: [(usize, u32); MAX_PARTS_PER_ALLOC],
+}
+
+/// Tracker for composite allocations using fixed-size array
+struct CompositeBlockTracker {
+    /// Array to store composite block metadata
+    blocks: [Option<CompositeBlockInfo>; MAX_COMPOSITE_ALLOCS],
+    /// Number of active composite allocations
+    count: usize,
+}
+
+impl CompositeBlockTracker {
+    const fn new() -> Self {
+        Self {
+            blocks: [None; MAX_COMPOSITE_ALLOCS],
+            count: 0,
+        }
+    }
+
+    /// Insert a new composite block
+    ///
+    /// Returns false if the tracker is full
+    fn insert(&mut self, base_addr: usize, parts: &[(usize, u32)], part_count: usize) -> bool {
+        if self.count >= MAX_COMPOSITE_ALLOCS {
+            return false;
+        }
+
+        let mut info = CompositeBlockInfo {
+            base_addr,
+            part_count: part_count as u8,
+            parts: [(0, 0); MAX_PARTS_PER_ALLOC],
+        };
+
+        for i in 0..part_count {
+            info.parts[i] = parts[i];
+        }
+
+        self.blocks[self.count] = Some(info);
+        self.count += 1;
+        true
+    }
+
+    /// Find a composite block by its base address
+    fn find(&self, base_addr: usize) -> Option<CompositeBlockInfo> {
+        for i in 0..self.count {
+            if let Some(info) = self.blocks[i] {
+                if info.base_addr == base_addr {
+                    return Some(info);
+                }
+            }
+        }
+        None
+    }
+
+    /// Remove a composite block by its base address
+    ///
+    /// Returns true if the block was found and removed
+    fn remove(&mut self, base_addr: usize) -> bool {
+        for i in 0..self.count {
+            if let Some(info) = self.blocks[i] {
+                if info.base_addr == base_addr {
+                    // Move the last element to this position to keep array compact
+                    if i < self.count - 1 {
+                        self.blocks[i] = self.blocks[self.count - 1];
+                    }
+                    self.blocks[self.count - 1] = None;
+                    self.count -= 1;
+                    return true;
+                }
+            }
+        }
+        false
+    }
+}
+
 pub struct CompositePageAllocator<const PAGE_SIZE: usize = { crate::DEFAULT_PAGE_SIZE }> {
     /// Underlying buddy allocator for standard allocations
     buddy: BuddyPageAllocator<PAGE_SIZE>,
+    /// Tracker for composite allocations (multiple buddy blocks combined)
+    composite_tracker: CompositeBlockTracker,
 }
 
 impl<const PAGE_SIZE: usize> CompositePageAllocator<PAGE_SIZE> {
@@ -19,6 +107,7 @@ impl<const PAGE_SIZE: usize> CompositePageAllocator<PAGE_SIZE> {
     pub const fn new() -> Self {
         Self {
             buddy: BuddyPageAllocator::<PAGE_SIZE>::new(),
+            composite_tracker: CompositeBlockTracker::new(),
         }
     }
 
@@ -154,6 +243,18 @@ impl<const PAGE_SIZE: usize> CompositePageAllocator<PAGE_SIZE> {
                 num_pages
             );
 
+            // Save metadata to tracker for proper deallocation
+            if !self.composite_tracker.insert(min_addr, &parts[..block_count], block_count) {
+                // Tracker is full, rollback and fail
+                warn!("Composite tracker full, rolling back allocation");
+                for j in 0..block_count {
+                    let (dealloc_addr, dealloc_order) = parts[j];
+                    let dealloc_pages = 1usize << dealloc_order;
+                    self.buddy.dealloc_pages(dealloc_addr, dealloc_pages);
+                }
+                return None;
+            }
+
             debug!("Contiguous block allocation succeeded: base_addr={:#x}, pages={}, parts={}, actual_pages={}",
                   min_addr, num_pages, block_count, actual_pages);
 
@@ -216,12 +317,33 @@ impl<const PAGE_SIZE: usize> PageAllocator for CompositePageAllocator<PAGE_SIZE>
             return;
         }
 
-        // Check if we need to decompose the deallocation
-        if num_pages.is_power_of_two() {
-            // Power-of-2: can deallocate directly to buddy
-            self.buddy.dealloc_pages(pos, num_pages);
+        // Check if this is a composite allocation
+        if let Some(info) = self.composite_tracker.find(pos) {
+            // Composite block: deallocate each part separately
+            debug!(
+                "Deallocating composite block: base_addr={:#x}, part_count={}",
+                pos, info.part_count
+            );
+
+            for i in 0..info.part_count as usize {
+                let (addr, order) = info.parts[i];
+                let pages = 1usize << order;
+                debug!(
+                    "  Part {}: addr={:#x}, order={}, pages={}",
+                    i, addr, order, pages
+                );
+                self.buddy.dealloc_pages(addr, pages);
+            }
+
+            // Remove from tracker
+            self.composite_tracker.remove(pos);
         } else {
-            self.buddy.dealloc_pages(pos, num_pages.next_power_of_two());
+            // Regular buddy block: deallocate directly
+            if num_pages.is_power_of_two() {
+                self.buddy.dealloc_pages(pos, num_pages);
+            } else {
+                self.buddy.dealloc_pages(pos, num_pages.next_power_of_two());
+            }
         }
     }
 
@@ -289,5 +411,88 @@ impl<const PAGE_SIZE: usize> crate::slab::PageAllocatorForSlab
 impl<const PAGE_SIZE: usize> Default for CompositePageAllocator<PAGE_SIZE> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_composite_block_tracker() {
+        let mut tracker = CompositeBlockTracker::new();
+
+        // Test insertion
+        let parts = [(0x1000, 3), (0x2000, 2)];
+        assert!(tracker.insert(0x1000, &parts, 2));
+        assert_eq!(tracker.count, 1);
+
+        // Test finding
+        let info = tracker.find(0x1000);
+        assert!(info.is_some());
+        let info = info.unwrap();
+        assert_eq!(info.base_addr, 0x1000);
+        assert_eq!(info.part_count, 2);
+        assert_eq!(info.parts[0], (0x1000, 3));
+        assert_eq!(info.parts[1], (0x2000, 2));
+
+        // Test removal
+        assert!(tracker.remove(0x1000));
+        assert_eq!(tracker.count, 0);
+        assert!(tracker.find(0x1000).is_none());
+    }
+
+    #[test]
+    fn test_composite_block_tracker_capacity() {
+        let mut tracker = CompositeBlockTracker::new();
+
+        // Fill the tracker to capacity
+        for i in 0..MAX_COMPOSITE_ALLOCS {
+            let parts = [(0x1000 + i * 0x1000, 3)];
+            assert!(tracker.insert(0x1000 + i * 0x1000, &parts, 1));
+        }
+
+        assert_eq!(tracker.count, MAX_COMPOSITE_ALLOCS);
+
+        // Try to insert one more - should fail
+        let parts = [(0x10000, 3)];
+        assert!(!tracker.insert(0x10000, &parts, 1));
+
+        // Remove one and verify we can insert again
+        assert!(tracker.remove(0x1000));
+        assert!(tracker.insert(0x10000, &parts, 1));
+    }
+
+    #[test]
+    fn test_composite_tracker_find_nonexistent() {
+        let tracker = CompositeBlockTracker::new();
+        assert!(tracker.find(0x1000).is_none());
+    }
+
+    #[test]
+    fn test_composite_tracker_remove_nonexistent() {
+        let mut tracker = CompositeBlockTracker::new();
+        assert!(!tracker.remove(0x1000));
+    }
+
+    #[test]
+    fn test_composite_tracker_multiple_blocks() {
+        let mut tracker = CompositeBlockTracker::new();
+
+        let parts1 = [(0x1000, 3), (0x2000, 2)];
+        let parts2 = [(0x3000, 4), (0x4000, 3), (0x5000, 2)];
+
+        tracker.insert(0x1000, &parts1, 2);
+        tracker.insert(0x3000, &parts2, 3);
+
+        assert_eq!(tracker.count, 2);
+
+        let info1 = tracker.find(0x1000);
+        assert!(info1.is_some());
+        assert_eq!(info1.unwrap().part_count, 2);
+
+        let info2 = tracker.find(0x3000);
+        assert!(info2.is_some());
+        assert_eq!(info2.unwrap().part_count, 3);
     }
 }
