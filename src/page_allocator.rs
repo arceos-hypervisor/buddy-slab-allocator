@@ -111,6 +111,18 @@ impl<const PAGE_SIZE: usize> CompositePageAllocator<PAGE_SIZE> {
         }
     }
 
+    /// Set the address translator so that the underlying buddy allocator can
+    /// reason about physical address ranges (e.g. low-memory regions).
+    pub fn set_addr_translator(&mut self, translator: &'static dyn crate::AddrTranslator) {
+        self.buddy.set_addr_translator(translator);
+    }
+
+    /// Allocate low-memory pages (physical address < 4GiB).
+    /// This is a thin wrapper over the buddy allocator's lowmem allocation.
+    pub fn alloc_pages_lowmem(&mut self, num_pages: usize, alignment: usize) -> AllocResult<usize> {
+        self.buddy.alloc_pages_lowmem(num_pages, alignment)
+    }
+
     /// Try to find and allocate contiguous small blocks from buddy free lists.
     ///
     /// This method searches buddy free lists for contiguous blocks that can satisfy
@@ -244,7 +256,10 @@ impl<const PAGE_SIZE: usize> CompositePageAllocator<PAGE_SIZE> {
             );
 
             // Save metadata to tracker for proper deallocation
-            if !self.composite_tracker.insert(min_addr, &parts[..block_count], block_count) {
+            if !self
+                .composite_tracker
+                .insert(min_addr, &parts[..block_count], block_count)
+            {
                 // Tracker is full, rollback and fail
                 warn!("Composite tracker full, rolling back allocation");
                 for j in 0..block_count {
@@ -494,5 +509,61 @@ mod tests {
         let info2 = tracker.find(0x3000);
         assert!(info2.is_some());
         assert_eq!(info2.unwrap().part_count, 3);
+    }
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+    use alloc::alloc::{alloc, dealloc};
+    use core::alloc::Layout;
+
+    const TEST_HEAP_SIZE: usize = 16 * 1024 * 1024;
+    const TEST_PAGE_SIZE: usize = 0x1000;
+
+    fn alloc_test_heap(size: usize) -> (*mut u8, Layout) {
+        let layout = Layout::from_size_align(size, TEST_PAGE_SIZE).unwrap();
+        let ptr = unsafe { alloc(layout) };
+        assert!(!ptr.is_null());
+        (ptr, layout)
+    }
+
+    fn dealloc_test_heap(ptr: *mut u8, layout: Layout) {
+        unsafe { dealloc(ptr, layout) };
+    }
+
+    #[test]
+    fn test_composite_allocator_basic() {
+        let (heap_ptr, heap_layout) = alloc_test_heap(TEST_HEAP_SIZE);
+        let heap_addr = heap_ptr as usize;
+
+        let mut allocator = CompositePageAllocator::<TEST_PAGE_SIZE>::new();
+        allocator.init(heap_addr, TEST_HEAP_SIZE);
+
+        let addr1 = allocator.alloc_pages(1, TEST_PAGE_SIZE).unwrap();
+        let addr2 = allocator.alloc_pages(4, TEST_PAGE_SIZE).unwrap();
+
+        assert!(addr1 >= heap_addr && addr1 < heap_addr + TEST_HEAP_SIZE);
+        assert!(addr2 >= heap_addr && addr2 < heap_addr + TEST_HEAP_SIZE);
+
+        allocator.dealloc_pages(addr1, 1);
+        allocator.dealloc_pages(addr2, 4);
+
+        dealloc_test_heap(heap_ptr, heap_layout);
+    }
+
+    #[test]
+    fn test_composite_allocator_alignment() {
+        let (heap_ptr, heap_layout) = alloc_test_heap(TEST_HEAP_SIZE);
+        let heap_addr = heap_ptr as usize;
+
+        let mut allocator = CompositePageAllocator::<TEST_PAGE_SIZE>::new();
+        allocator.init(heap_addr, TEST_HEAP_SIZE);
+
+        let addr = allocator.alloc_pages(1, TEST_PAGE_SIZE * 4).unwrap();
+        assert_eq!(addr & (TEST_PAGE_SIZE * 4 - 1), 0);
+
+        allocator.dealloc_pages(addr, 1);
+        dealloc_test_heap(heap_ptr, heap_layout);
     }
 }

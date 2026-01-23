@@ -23,6 +23,8 @@ pub struct BuddySet<const PAGE_SIZE: usize = { crate::DEFAULT_PAGE_SIZE }> {
     pub(crate) end_addr: usize,
     total_pages: usize,
     zone_id: usize,
+    /// Whether this zone contains any memory that can map to low (<4G) physical addresses.
+    pub(crate) is_lowmem: bool,
     /// Free lists for each order
     free_lists: [PooledLinkedList; DEFAULT_MAX_ORDER + 1],
 }
@@ -35,6 +37,7 @@ impl<const PAGE_SIZE: usize> BuddySet<PAGE_SIZE> {
             end_addr: base_addr + size,
             total_pages: size / PAGE_SIZE,
             zone_id,
+            is_lowmem: false,
             free_lists: [const { PooledLinkedList::new() }; DEFAULT_MAX_ORDER + 1],
         }
     }

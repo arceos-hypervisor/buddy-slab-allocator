@@ -228,4 +228,27 @@ mod tests {
             None
         );
     }
+
+    #[test]
+    fn test_size_class_boundaries() {
+        // Test all size class boundaries
+        assert_eq!(SizeClass::Bytes8.size(), 8);
+        assert_eq!(SizeClass::Bytes16.size(), 16);
+        assert_eq!(SizeClass::Bytes32.size(), 32);
+        assert_eq!(SizeClass::Bytes64.size(), 64);
+        assert_eq!(SizeClass::Bytes128.size(), 128);
+        assert_eq!(SizeClass::Bytes256.size(), 256);
+        assert_eq!(SizeClass::Bytes512.size(), 512);
+        assert_eq!(SizeClass::Bytes1024.size(), 1024);
+        assert_eq!(SizeClass::Bytes2048.size(), 2048);
+    }
+
+    #[test]
+    fn test_size_class_alignment_limits() {
+        // Alignment too large should return None
+        assert_eq!(
+            SizeClass::from_layout(Layout::from_size_align(64, 4096).unwrap()),
+            None
+        );
+    }
 }
