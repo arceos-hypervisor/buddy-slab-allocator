@@ -44,7 +44,7 @@ fn dealloc_test_heap(ptr: *mut u8, layout: Layout) {
 #[test]
 fn test_alloc_dma32_pages_uninitialized() {
     // Create a new allocator but don't initialize it
-    let allocator = GlobalAllocator::<PAGE_SIZE>::new();
+    let mut allocator = GlobalAllocator::<PAGE_SIZE>::new();
 
     // Try to allocate pages - should fail because allocator is not initialized
     let result = allocator.alloc_dma32_pages(1, PAGE_SIZE);
@@ -66,7 +66,7 @@ fn test_alloc_dma32_pages_initialized() {
     let heap_addr = heap_ptr as usize;
 
     // Create allocator and set address translator
-    let allocator = GlobalAllocator::<PAGE_SIZE>::new();
+    let mut allocator = GlobalAllocator::<PAGE_SIZE>::new();
     allocator.set_addr_translator(&MOCK_TRANSLATOR);
 
     // Initialize allocator
@@ -146,7 +146,7 @@ fn test_alloc_dma32_pages_memory_structure() {
     let heap_addr = heap_ptr as usize;
 
     // Create allocator and set address translator
-    let allocator = GlobalAllocator::<PAGE_SIZE>::new();
+    let mut allocator = GlobalAllocator::<PAGE_SIZE>::new();
     allocator.set_addr_translator(&MOCK_TRANSLATOR);
 
     // Initialize allocator
@@ -244,7 +244,7 @@ fn test_alloc_dma32_pages_memory_stats() {
     let heap_addr = heap_ptr as usize;
 
     // Create allocator and set address translator
-    let allocator = GlobalAllocator::<PAGE_SIZE>::new();
+    let mut allocator = GlobalAllocator::<PAGE_SIZE>::new();
     allocator.set_addr_translator(&MOCK_TRANSLATOR);
 
     // Initialize allocator
@@ -324,7 +324,7 @@ fn test_alloc_dma32_pages_multiple_zones() {
     let heap_addr2 = heap_ptr2 as usize;
 
     // Create allocator and set address translator
-    let allocator = GlobalAllocator::<PAGE_SIZE>::new();
+    let mut allocator = GlobalAllocator::<PAGE_SIZE>::new();
     allocator.set_addr_translator(&MOCK_TRANSLATOR);
 
     // Initialize allocator with first memory region
@@ -390,7 +390,7 @@ fn test_alloc_dma32_pages_vs_normal_pages() {
     let heap_addr = heap_ptr as usize;
 
     // Create allocator and set address translator
-    let allocator = GlobalAllocator::<PAGE_SIZE>::new();
+    let mut allocator = GlobalAllocator::<PAGE_SIZE>::new();
     allocator.set_addr_translator(&MOCK_TRANSLATOR);
 
     // Initialize allocator
@@ -467,7 +467,7 @@ fn test_alloc_dma32_pages_edge_cases() {
     let heap_addr = heap_ptr as usize;
 
     // Create allocator and set address translator
-    let allocator = GlobalAllocator::<PAGE_SIZE>::new();
+    let mut allocator = GlobalAllocator::<PAGE_SIZE>::new();
     allocator.set_addr_translator(&MOCK_TRANSLATOR);
 
     // Initialize allocator
@@ -498,7 +498,7 @@ fn test_alloc_dma32_pages_stress() {
     let heap_addr = heap_ptr as usize;
 
     // Create allocator and set address translator
-    let allocator = GlobalAllocator::<PAGE_SIZE>::new();
+    let mut allocator = GlobalAllocator::<PAGE_SIZE>::new();
     allocator.set_addr_translator(&MOCK_TRANSLATOR);
 
     // Initialize allocator

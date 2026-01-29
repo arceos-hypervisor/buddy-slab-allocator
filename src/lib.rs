@@ -198,7 +198,7 @@ pub use global_allocator::UsageStats;
 /// use buddy_slab_allocator::{GlobalAllocator, PageAllocator};
 ///
 /// const PAGE_SIZE: usize = 0x1000;
-/// let allocator = GlobalAllocator::<PAGE_SIZE>::new();
+/// let mut allocator = GlobalAllocator::<PAGE_SIZE>::new();
 ///
 /// // Initialize with memory region
 /// let heap_start = 0x8000_0000;
@@ -218,7 +218,7 @@ pub use global_allocator::UsageStats;
 /// use core::alloc::Layout;
 ///
 /// const PAGE_SIZE: usize = 0x1000;
-/// let allocator = GlobalAllocator::<PAGE_SIZE>::new();
+/// let mut allocator = GlobalAllocator::<PAGE_SIZE>::new();
 /// allocator.init(0x8000_0000, 16 * 1024 * 1024).unwrap();
 ///
 /// // Small allocations go through slab allocator
@@ -236,7 +236,7 @@ pub use global_allocator::UsageStats;
 /// use buddy_slab_allocator::GlobalAllocator;
 ///
 /// const PAGE_SIZE: usize = 0x1000;
-/// let allocator = GlobalAllocator::<PAGE_SIZE>::new();
+/// let mut allocator = GlobalAllocator::<PAGE_SIZE>::new();
 /// allocator.init(0x8000_0000, 16 * 1024 * 1024).unwrap();
 ///
 /// let stats = allocator.get_stats();
