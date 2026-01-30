@@ -135,9 +135,71 @@ impl<const PAGE_SIZE: usize> BuddySet<PAGE_SIZE> {
             list.clear(pool);
         }
 
-        for pfn in 0..self.total_pages {
-            let page_addr = self.base_addr + pfn * PAGE_SIZE;
-            self.dealloc_pages(pool, page_addr, 1);
+        self.init_free_blocks(pool);
+    }
+
+    fn init_free_blocks(&mut self, pool: &mut GlobalNodePool) {
+        let mut remaining_pages = self.total_pages;
+        let mut current_addr = self.base_addr;
+
+        while remaining_pages > 0 {
+            // Find the maximum order constrained by:
+            // 1. Remaining pages (can't allocate more than what's left)
+            // 2. Address alignment (block address must be aligned to block_size)
+            // 3. Maximum supported order
+            
+            // Maximum order based on remaining pages
+            let max_order_by_pages = if remaining_pages.is_power_of_two() {
+                remaining_pages.trailing_zeros() as usize
+            } else {
+                // For non-power-of-2, use the highest bit position
+                (remaining_pages.next_power_of_two() >> 1).trailing_zeros() as usize
+            };
+            
+            // Maximum order based on address alignment
+            // For each order, check if current_addr is aligned to (2^order * PAGE_SIZE)
+            let mut max_order_by_alignment = 0;
+            for test_order in 0..=self.max_order() {
+                let block_size = (1 << test_order) * PAGE_SIZE;
+                if current_addr % block_size == 0 {
+                    max_order_by_alignment = test_order;
+                } else {
+                    break;
+                }
+            }
+            
+            // Take the minimum of all constraints
+            let order = max_order_by_pages
+                .min(max_order_by_alignment)
+                .min(self.max_order());
+
+            let block_pages = 1 << order;
+            let block_size = block_pages * PAGE_SIZE;
+            
+            // Verify alignment: address must be exact multiple of block_size
+            assert!(
+                current_addr & (block_size - 1) == 0,
+                "Block address {:#x} not aligned to block size {:#x} (order {})",
+                current_addr, block_size, order
+            );
+            
+            // Construct and add the block
+            let block = BuddyBlock {
+                order,
+                addr: current_addr,
+            };
+            
+            if !self.add_block_to_order(pool, order, block) {
+                error!(
+                    "zone {}: Failed to add block during fast init: addr={:#x}, order={}, remaining_pages={}",
+                    self.zone_id, current_addr, order, remaining_pages
+                );
+                // Critical failure during initialization
+                panic!("Failed to initialize buddy system");
+            }
+            
+            current_addr += block_size;
+            remaining_pages -= block_pages;
         }
     }
 
