@@ -132,9 +132,7 @@ impl PooledLinkedList {
 
     /// Pop an element from the front of the list
     pub fn pop_front(&mut self, pool: &mut GlobalNodePool) -> Option<BuddyBlock> {
-        if self.head.is_none() {
-            return None;
-        }
+        self.head?;
 
         let head_idx = self.head?;
 
@@ -318,7 +316,7 @@ impl PooledLinkedList {
     ///
     /// Returns all nodes to the global pool
     pub fn clear(&mut self, pool: &mut GlobalNodePool) {
-        while let Some(_) = self.pop_front(pool) {
+        while self.pop_front(pool).is_some() {
             // Just pop all elements
         }
     }

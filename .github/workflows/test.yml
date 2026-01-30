@@ -1,0 +1,23 @@
+name: Test
+
+on:
+  workflow_call:
+
+jobs:
+  host-test:
+    name: Run Logic Tests (Host)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2025-04-01
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run all tests
+        run: cargo test --all-features

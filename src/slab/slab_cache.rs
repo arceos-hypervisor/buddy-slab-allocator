@@ -159,7 +159,7 @@ impl SlabCache {
     ) -> AllocResult<(usize, usize)> {
         let object_size = self.size_class.size();
         let bytes_needed = SlabNode::MAX_OBJECTS * object_size;
-        let page_count = (bytes_needed + page_size - 1) / page_size;
+        let page_count = bytes_needed.div_ceil(page_size);
         let slab_bytes = page_count * page_size;
 
         let start_addr = page_allocator.alloc_pages(page_count, slab_bytes)?;
@@ -192,7 +192,7 @@ impl SlabCache {
 
         let object_size = self.size_class.size();
         let bytes_needed = SlabNode::MAX_OBJECTS * object_size;
-        let page_count = (bytes_needed + page_size - 1) / page_size;
+        let page_count = bytes_needed.div_ceil(page_size);
         let slab_bytes = page_count * page_size;
 
         if let Ok(start_addr) = page_allocator.alloc_pages(page_count, slab_bytes) {
@@ -216,7 +216,7 @@ impl SlabCache {
     ) -> (usize, bool) {
         let object_size = self.size_class.size();
         let bytes_needed = SlabNode::MAX_OBJECTS * object_size;
-        let page_count = (bytes_needed + page_size - 1) / page_size;
+        let page_count = bytes_needed.div_ceil(page_size);
         let slab_bytes = page_count * page_size;
 
         let slab_base = align_down_any(obj_addr, slab_bytes);

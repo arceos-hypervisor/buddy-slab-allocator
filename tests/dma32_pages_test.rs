@@ -482,10 +482,9 @@ fn test_alloc_dma32_pages_edge_cases() {
     let result = allocator.alloc_dma32_pages(0, PAGE_SIZE);
     // Note: The behavior for 0 pages may vary - some allocators return 0, others error
     // This test assumes it might succeed (returning 0) or fail, but shouldn't panic
-    match result {
-        Ok(addr) => assert_eq!(addr, 0, "Expected 0 for 0 pages allocation"),
-        Err(_) => {} // Error is also acceptable for 0 pages
-    }
+    if let Ok(addr) = result {
+        assert_eq!(addr, 0, "Expected 0 for 0 pages allocation");
+    } // Error is also acceptable for 0 pages
 
     // Clean up
     dealloc_test_heap(heap_ptr, heap_layout);

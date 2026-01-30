@@ -1,4 +1,4 @@
-//! Global allocator implementation for Axvisor.
+//! Global allocator implementation.
 //!
 //! This module implements a global allocator that coordinates between
 //! buddy page allocator and slab byte allocator for optimal performance.
@@ -24,26 +24,13 @@ const MIN_HEAP_SIZE: usize = 0x8000; // 32KB minimum heap
 
 /// Memory usage statistics
 #[cfg(feature = "tracking")]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct UsageStats {
     pub total_pages: usize,
     pub used_pages: usize,
     pub free_pages: usize,
     pub slab_bytes: usize,
     pub heap_bytes: usize,
-}
-
-#[cfg(feature = "tracking")]
-impl Default for UsageStats {
-    fn default() -> Self {
-        Self {
-            total_pages: 0,
-            used_pages: 0,
-            free_pages: 0,
-            slab_bytes: 0,
-            heap_bytes: 0,
-        }
-    }
 }
 
 /// Internal atomic representation of usage statistics
@@ -125,7 +112,23 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
             error!("global allocator: Allocator not initialized");
             return Err(AllocError::NoMemory);
         }
-        self.page_allocator.alloc_pages_lowmem(num_pages, alignment)
+
+        let addr = self
+            .page_allocator
+            .alloc_pages_lowmem(num_pages, alignment)?;
+
+        // Update statistics
+        #[cfg(feature = "tracking")]
+        {
+            self.stats
+                .used_pages
+                .fetch_add(num_pages, Ordering::Relaxed);
+            self.stats
+                .free_pages
+                .fetch_sub(num_pages, Ordering::Relaxed);
+        }
+
+        Ok(addr)
     }
 
     /// Initialize allocator with given memory region
@@ -240,7 +243,7 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
             }
         }
 
-        let pages_needed = (layout.size() + PAGE_SIZE - 1) / PAGE_SIZE;
+        let pages_needed = layout.size().div_ceil(PAGE_SIZE);
 
         let addr =
             PageAllocator::alloc_pages(&mut self.page_allocator, pages_needed, layout.align())?;
@@ -316,7 +319,7 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
         }
 
         // This memory was allocated by page allocator
-        let pages_needed = (layout.size() + PAGE_SIZE - 1) / PAGE_SIZE;
+        let pages_needed = layout.size().div_ceil(PAGE_SIZE);
         PageAllocator::dealloc_pages(
             &mut self.page_allocator,
             ptr.as_ptr() as usize,
@@ -351,6 +354,7 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
     }
 
     /// Reallocate memory
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     pub fn realloc(&mut self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         if new_size == 0 {
             if let Some(ptr) = NonNull::new(ptr) {

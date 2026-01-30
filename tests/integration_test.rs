@@ -14,7 +14,6 @@ use buddy_slab_allocator::{
     PageAllocator, SlabByteAllocator,
 };
 use core::alloc::Layout;
-use core::ptr::NonNull;
 
 const PAGE_SIZE: usize = 0x1000;
 const TEST_HEAP_SIZE: usize = 16 * 1024 * 1024; // 16MB
@@ -173,15 +172,12 @@ fn test_slab_allocator_basic() {
     // Test various small allocations
     let layout8 = Layout::from_size_align(8, 8).unwrap();
     let ptr8 = slab_allocator.alloc(layout8).unwrap();
-    assert!(!ptr8.as_ptr().is_null());
 
     let layout64 = Layout::from_size_align(64, 8).unwrap();
     let ptr64 = slab_allocator.alloc(layout64).unwrap();
-    assert!(!ptr64.as_ptr().is_null());
 
     let layout2048 = Layout::from_size_align(2048, 8).unwrap();
     let ptr2048 = slab_allocator.alloc(layout2048).unwrap();
-    assert!(!ptr2048.as_ptr().is_null());
 
     // Deallocate
     slab_allocator.dealloc(ptr8, layout8);
@@ -255,7 +251,6 @@ fn test_global_allocator_small_alloc() {
     // Small allocations should go through slab
     let layout = Layout::from_size_align(64, 8).unwrap();
     let ptr = allocator.alloc(layout).unwrap();
-    assert!(!ptr.as_ptr().is_null());
 
     allocator.dealloc(ptr, layout);
 
@@ -273,7 +268,6 @@ fn test_global_allocator_large_alloc() {
     // Large allocations should go through page allocator
     let layout = Layout::from_size_align(8192, PAGE_SIZE).unwrap();
     let ptr = allocator.alloc(layout).unwrap();
-    assert!(!ptr.as_ptr().is_null());
 
     allocator.dealloc(ptr, layout);
 
@@ -340,7 +334,7 @@ fn test_global_allocator_add_memory() {
     let mut allocator = GlobalAllocator::<PAGE_SIZE>::new();
     allocator.init(heap_addr1, TEST_HEAP_SIZE).unwrap();
 
-    let total_before = allocator.total_pages();
+    let _total_before = allocator.total_pages();
 
     // Try to add more memory (may fail if max zones reached)
     let _result = allocator.add_memory(heap_addr2, TEST_HEAP_SIZE);
@@ -382,7 +376,9 @@ fn test_statistics_tracking() {
     allocator.init(heap_addr, TEST_HEAP_SIZE).unwrap();
 
     let stats_initial = allocator.get_stats();
-    assert_eq!(stats_initial.total_pages, TEST_HEAP_SIZE / PAGE_SIZE);
+    // Note: total_pages excludes the node pool pages (10 pages reserved for Buddy allocator)
+    let expected_pages = TEST_HEAP_SIZE / PAGE_SIZE - 10;
+    assert_eq!(stats_initial.total_pages, expected_pages);
     assert_eq!(stats_initial.used_pages, 0);
 
     // Allocate some memory
@@ -420,7 +416,7 @@ fn test_stress_allocation_deallocation() {
     allocator.init(heap_addr, TEST_HEAP_SIZE).unwrap();
 
     // Stress test with many allocations
-    for round in 0..5 {
+    for _round in 0..5 {
         let mut allocations = Vec::new();
 
         for i in 0..50 {

@@ -171,11 +171,11 @@ impl<const PAGE_SIZE: usize> BuddyPageAllocator<PAGE_SIZE> {
 
     /// Get free blocks of a specific order from a zone
     /// Returns None if zone doesn't exist
-    pub fn get_free_blocks_by_order<'a>(
-        &'a self,
+    pub fn get_free_blocks_by_order(
+        &self,
         zone_id: usize,
         order: u32,
-    ) -> Option<super::pooled_list::PooledListIter<'a>> {
+    ) -> Option<super::pooled_list::PooledListIter<'_>> {
         if zone_id >= self.num_zones {
             return None;
         }
@@ -297,12 +297,7 @@ impl<const PAGE_SIZE: usize> BuddyPageAllocator<PAGE_SIZE> {
 
     /// Find the zone that contains the given address
     pub fn find_zone_for_addr(&self, addr: usize) -> Option<usize> {
-        for i in 0..self.num_zones {
-            if self.zones[i].addr_in_zone(addr) {
-                return Some(i);
-            }
-        }
-        None
+        (0..self.num_zones).find(|&i| self.zones[i].addr_in_zone(addr))
     }
 
     /// Print detailed allocation failure statistics

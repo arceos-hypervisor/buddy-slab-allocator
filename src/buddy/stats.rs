@@ -94,16 +94,16 @@ impl MemoryStatsReporter {
             );
             error!("========================================");
 
-            for i in 0..num_zones {
+            for (i, zone_info) in zone_infos.iter().take(num_zones).enumerate() {
                 error!("Zone {}:", i);
                 error!(
                     "  Range: [{:#x}, {:#x})",
-                    zone_infos[i].start_addr, zone_infos[i].end_addr
+                    zone_info.start_addr, zone_info.end_addr
                 );
-                error!("  Total pages: {}", zone_infos[i].total_pages);
+                error!("  Total pages: {}", zone_info.total_pages);
                 error!(
                     "  Free pages: {} / {}",
-                    zone_stats[i].free_pages, zone_infos[i].total_pages
+                    zone_stats[i].free_pages, zone_info.total_pages
                 );
                 error!("  Free blocks by order:");
 

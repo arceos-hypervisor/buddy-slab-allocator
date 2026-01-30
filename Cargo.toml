@@ -2,9 +2,14 @@
 name = "buddy-slab-allocator"
 version = "0.1.0"
 edition = "2021"
-authors = ["Song Zhiyong <songzhy30@qq.com>"]
+authors = ["Song Zhiyong <songzhyo@qq.com>"]
 description = "Memory allocator with Buddy and Slab allocation"
-license = "GPL-3.0-or-later OR Apache-2.0 OR MulanPSL-2.0"
+documentation = "https://docs.rs/buddy-slab-allocator"
+repository = "https://github.com/arceos-hypervisor/buddy-slab-allocator"
+readme = "README.md"
+license = "Apache-2.0"
+keywords = ["buddy", "slab", "allocator"]
+categories = ["memory-management", "no-std", "embedded"]
 
 [features]
 default = []

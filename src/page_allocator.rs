@@ -53,9 +53,7 @@ impl CompositeBlockTracker {
             parts: [(0, 0); MAX_PARTS_PER_ALLOC],
         };
 
-        for i in 0..part_count {
-            info.parts[i] = parts[i];
-        }
+        info.parts[..part_count].copy_from_slice(&parts[..part_count]);
 
         self.blocks[self.count] = Some(info);
         self.count += 1;
@@ -182,20 +180,18 @@ impl<const PAGE_SIZE: usize> CompositePageAllocator<PAGE_SIZE> {
                             max_addr = block_end;
                             block_count += 1;
                             remaining_pages -= block_pages.min(remaining_pages);
-                        } else {
-                            if block_end == min_addr {
-                                // Block is to the left, update min_addr
-                                contiguous_blocks[block_count] = (block_start, order as u32);
-                                min_addr = block_start;
-                                block_count += 1;
-                                remaining_pages -= block_pages.min(remaining_pages);
-                            } else if block_start == max_addr {
-                                // Block is to the right, update max_addr
-                                contiguous_blocks[block_count] = (block_start, order as u32);
-                                max_addr = block_end;
-                                block_count += 1;
-                                remaining_pages -= block_pages.min(remaining_pages);
-                            }
+                        } else if block_end == min_addr {
+                            // Block is to the left, update min_addr
+                            contiguous_blocks[block_count] = (block_start, order as u32);
+                            min_addr = block_start;
+                            block_count += 1;
+                            remaining_pages -= block_pages.min(remaining_pages);
+                        } else if block_start == max_addr {
+                            // Block is to the right, update max_addr
+                            contiguous_blocks[block_count] = (block_start, order as u32);
+                            max_addr = block_end;
+                            block_count += 1;
+                            remaining_pages -= block_pages.min(remaining_pages);
                         }
 
                         if remaining_pages == 0 {
@@ -232,6 +228,7 @@ impl<const PAGE_SIZE: usize> CompositePageAllocator<PAGE_SIZE> {
                 if let Err(_e) = self.buddy.alloc_pages_at(addr, block_pages, alignment) {
                     // Allocation failed, rollback
                     warn!("Contiguous block allocation failed at {}, rolling back", i);
+                    #[allow(clippy::needless_range_loop)]
                     for j in 0..i {
                         let (dealloc_addr, dealloc_order) = parts[j];
                         let dealloc_pages = 1usize << dealloc_order;
@@ -262,6 +259,7 @@ impl<const PAGE_SIZE: usize> CompositePageAllocator<PAGE_SIZE> {
             {
                 // Tracker is full, rollback and fail
                 warn!("Composite tracker full, rolling back allocation");
+                #[allow(clippy::needless_range_loop)]
                 for j in 0..block_count {
                     let (dealloc_addr, dealloc_order) = parts[j];
                     let dealloc_pages = 1usize << dealloc_order;

@@ -1,0 +1,46 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [0.1.0] - 2025-01-30
+
+### Added
+- Buddy page allocator implementation for page-level allocation
+- Slab byte allocator implementation for small object allocation
+- Composite page allocator for unified multi-region page allocation
+- Global allocator that coordinates page and byte allocators
+- Automatic allocation size selection (≤2048 bytes uses slab, >2048 bytes uses page)
+- Zero `std` dependency (`#![no_std]`) for embedded/kernel environments
+- Optional `log` feature for logging allocation events
+- Optional `tracking` feature for memory usage statistics
+- `AddrTranslator` trait for virtual-to-physical address translation
+- `BaseAllocator`, `ByteAllocator`, `PageAllocator`, and `IdAllocator` traits
+- Comprehensive error handling with `AllocError` enum
+
+### Features
+- O(1) time complexity for small object allocation
+- Buddy algorithm for efficient page allocation with automatic merging
+- Support for multiple memory regions
+- Flexible page size configuration (const generic)
+- Memory fragmentation reduction through slab allocation
+- Statistics tracking for debugging and profiling
+
+### Documentation
+- Complete API documentation with examples
+- README with bilingual (English/Chinese) documentation
+- Inline documentation for all public APIs
+
+### Testing
+- Integration tests for page allocator
+- Integration tests for slab allocator
+- Integration tests for global allocator
+- DMA32 pages test cases
+- Comprehensive edge case coverage
+
+## [Unreleased]: https://github.com/arceos-hypervisor/buddy-slab-allocator/compare/v0.1.0...HEAD
+## [0.1.0]: https://github.com/arceos-hypervisor/buddy-slab-allocator/releases/tag/v0.1.0

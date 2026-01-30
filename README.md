@@ -1,108 +1,184 @@
-# buddy-slab-allocator 内存分配器
+# buddy-slab-allocator
 
-一个高效的页级和字节级内存分配器，为嵌入式/内核环境设计。
+A high-performance page-level and byte-level memory allocator designed for embedded/kernel environments.
 
-## 特性
+## Features
 
-- **Buddy 页分配器**：页级内存分配
-- **Slab 字节分配器**：小对象分配
-- **复合页分配器**：统一的多区域页分配接口
-- **全局分配器**：协调页分配器和字节分配器，提供统一的分配接口
-- **零 `std` 依赖**：完全 `#![no_std]`，适合嵌入式和内核环境
-- **条件日志**：支持 `log` feature 启用日志，默认无依赖
-- **内存追踪**：支持 `tracking` feature 收集详细统计信息
+- **Buddy Page Allocator**: Page-level memory allocation
+- **Slab Byte Allocator**: Small object allocation
+- **Composite Page Allocator**: Unified multi-region page allocation interface
+- **Global Allocator**: Coordinates page and byte allocators with unified allocation interface
+- **Zero `std` Dependency**: Fully `#![no_std]`, suitable for embedded and kernel environments
+- **Conditional Logging**: Support `log` feature for logging, no dependencies by default
+- **Memory Tracking**: Support `tracking` feature for detailed statistics
 
-## 快速开始
+## Quick Start
 
-### 添加依赖
+### Add Dependency
 
-在 `Cargo.toml` 中添加：
+Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-buddy-slab-allocator = { path = "allocator" }
+buddy-slab-allocator = "0.1.0"
 
-# 可选功能
-buddy-slab-allocator = { path = "allocator", features = ["log"] }    # 启用日志
-buddy-slab-allocator = { path = "allocator", features = ["tracking"] } # 启用追踪
+# Optional features
+buddy-slab-allocator = { version = "0.1.0", features = ["log"] }      # Enable logging
+buddy-slab-allocator = { version = "0.1.0", features = ["tracking"] }  # Enable tracking
 ```
 
-### 基本使用
+### Basic Usage
 
-#### 使用全局分配器
+#### Using Global Allocator
 
 ```rust
 use buddy_slab_allocator::GlobalAllocator;
 use core::alloc::Layout;
 
-// 创建全局分配器
+// Create global allocator
 let mut global = GlobalAllocator::new();
 
-// 初始化全局分配器
-global.init().unwrap();
+// Initialize the global allocator with memory region
+let heap_start = 0x8000_0000;
+let heap_size = 16 * 1024 * 1024; // 16MB
+global.init(heap_start, heap_size).unwrap();
 
-// 添加内存池
-global.add_memory(0x80000000, 0x1000000).unwrap(); 
+// Or add multiple memory pools
+global.add_memory(0x80000000, 0x1000000).unwrap();
+global.add_memory(0x81000000, 0x1000000).unwrap();
 
-// 不大于2048byte小对象分配 (自动使用 Slab)
+// Small object allocation (automatically uses Slab allocator)
 let small_layout = Layout::from_size_align(64, 8).unwrap();
 let small_ptr = global.alloc(small_layout).unwrap();
 
-// 大对象分配 (自动使用页分配器)
+// Large object allocation (automatically uses page allocator)
 let large_layout = Layout::from_size_align(0x1000, 0x1000).unwrap();
 let large_ptr = global.alloc(large_layout).unwrap();
 
-// 释放内存
+// Free memory
 global.dealloc(small_ptr, small_layout);
 global.dealloc(large_ptr, large_layout);
 ```
 
-## 特性详解
-
-### 条件日志
-
-通过 `log` feature 启用日志功能：
-
-```toml
-buddy-slab-allocator = { path = "allocator", features = ["log"] }
-```
-
-启用后可使用标准 `log` crate 的宏记录分配事件：
+#### Using Page Allocator Directly
 
 ```rust
-log::info!("分配内存于 {:x}", addr);
+use buddy_slab_allocator::CompositePageAllocator;
+
+const PAGE_SIZE: usize = 0x1000;
+let mut page_alloc = CompositePageAllocator::<PAGE_SIZE>::new();
+
+// Initialize with memory region
+page_alloc.init(0x8000_0000, 16 * 1024 * 1024).unwrap();
+
+// Allocate pages
+let addr = page_alloc.alloc_pages(4, PAGE_SIZE).unwrap();
+// Use the allocated memory...
+page_alloc.dealloc_pages(addr, 4);
 ```
 
-未启用时，日志调用会被编译为空操作，零运行时开销。
+#### Using Slab Allocator Directly
 
-### 内存追踪
+```rust
+use buddy_slab_allocator::SlabByteAllocator;
+use buddy_slab_allocator::page_allocator::PageAllocatorForSlab;
+use buddy_slab_allocator::CompositePageAllocator;
+use core::alloc::Layout;
 
-通过 `tracking` feature 启用详细的内存使用追踪：
+const PAGE_SIZE: usize = 0x1000;
+let mut page_alloc = CompositePageAllocator::<PAGE_SIZE>::new();
+page_alloc.init(0x8000_0000, 16 * 1024 * 1024).unwrap();
+
+let mut slab_alloc = SlabByteAllocator::<PAGE_SIZE>::new();
+
+// Small allocations are fast
+let layout = Layout::from_size_align(64, 8).unwrap();
+let ptr = slab_alloc.alloc(&mut page_alloc, layout).unwrap();
+
+// Free memory
+slab_alloc.dealloc(&mut page_alloc, ptr, layout);
+```
+
+## Features Details
+
+### Conditional Logging
+
+Enable logging via `log` feature:
 
 ```toml
-buddy-slab-allocator = { path = "allocator", features = ["tracking"] }
+buddy-slab-allocator = { version = "0.1.0", features = ["log"] }
 ```
 
-启用后可以：
-- 收集每种内存用途的字节数统计
-- 记录每次分配的回溯信息
-- 跟踪分配代际变化
+After enabling, you can use standard `log` crate macros to log allocation events:
 
-## 性能特性
+```rust
+log::info!("Allocated memory at {:x}", addr);
+```
 
-- **快速分配**：小对象分配 O(1) 时间复杂度
-- **内存效率**：Buddy 算法有效减少外部碎片
-- **自动合并**：释放的页面自动合并，减少碎片
+When disabled, log calls are compiled to no-ops with zero runtime overhead.
 
+### Memory Tracking
 
-## 测试
+Enable detailed memory usage tracking via `tracking` feature:
 
-运行测试套件：
+```toml
+buddy-slab-allocator = { version = "0.1.0", features = ["tracking"] }
+```
+
+After enabling, you can:
+- Collect statistics of bytes allocated for each memory usage
+- Record backtrace information for each allocation
+- Track allocation generation changes
+
+## Performance
+
+- **Fast Allocation**: Small object allocation has O(1) time complexity
+- **Memory Efficiency**: Buddy algorithm effectively reduces external fragmentation
+- **Auto Merge**: Freed pages automatically merge to reduce fragmentation
+
+## Testing
+
+Run the test suite:
 
 ```bash
-# 运行所有测试
+# Run all tests
 cargo test --package buddy-slab-allocator
 
-# 启用日志运行测试
+# Run tests with logging enabled
 cargo test --package buddy-slab-allocator --features log
+
+# Run tests with tracking enabled
+cargo test --package buddy-slab-allocator --features tracking
 ```
+
+## Documentation
+
+API documentation is available on [docs.rs](https://docs.rs/buddy-slab-allocator).
+
+To build and view documentation locally:
+
+```bash
+cargo doc --no-deps --open
+```
+
+## License
+
+This project is licensed under:
+
+- **GPL-3.0-or-later** OR
+- **Apache-2.0** OR
+- **MIT**
+
+You may choose any of these licenses for your use.
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+## Repository
+
+[https://github.com/arceos-hypervisor/buddy-slab-allocator](https://github.com/arceos-hypervisor/buddy-slab-allocator)
+
+## Chinese Documentation
+
+中文文档请查看 [README_CN.md](README_CN.md)

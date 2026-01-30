@@ -71,6 +71,7 @@ impl SlabNode {
         if object_count < Self::MAX_OBJECTS {
             let full_words = object_count / 64;
             let rem_bits = object_count % 64;
+            #[allow(clippy::needless_range_loop)]
             for i in 0..FREE_BITMAP_WORDS {
                 if i < full_words {
                     continue;
@@ -195,7 +196,7 @@ impl SlabNode {
     pub fn page_count(&self, page_size: usize) -> usize {
         let object_size = self.size_class.size();
         let bytes_needed = Self::MAX_OBJECTS * object_size;
-        (bytes_needed + page_size - 1) / page_size
+        bytes_needed.div_ceil(page_size)
     }
 
     pub fn prev(&self) -> Option<usize> {
