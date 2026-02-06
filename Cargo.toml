@@ -15,9 +15,34 @@ categories = ["memory-management", "no-std", "embedded"]
 default = []
 log = ["dep:log"]
 tracking = []
+# Enable benchmarking (requires criterion and rand as regular dependencies)
+bench = ["dep:criterion", "dep:rand"]
 
 [dependencies]
 log = { version = "0.4", optional = true }
 cfg-if = "1.0"
+criterion = { version = "0.4", features = ["html_reports"], optional = true }
+rand = { version = "0.8", features = ["small_rng"], optional = true }
+
+[[bench]]
+name = "global_allocator"
+harness = false
+required-features = ["bench"]
+
+[[bench]]
+name = "buddy_allocator"
+harness = false
+required-features = ["bench"]
+
+[[bench]]
+name = "slab_allocator"
+harness = false
+required-features = ["bench"]
+
+[[bench]]
+name = "stability"
+harness = false
+required-features = ["bench"]
+
 
 

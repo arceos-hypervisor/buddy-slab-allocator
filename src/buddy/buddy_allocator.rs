@@ -242,10 +242,7 @@ impl<const PAGE_SIZE: usize> BuddyPageAllocator<PAGE_SIZE> {
     /// Add a new memory region as a new zone
     pub fn add_memory_region(&mut self, start: usize, size: usize) -> AllocResult<()> {
         if self.num_zones >= MAX_ZONES {
-            error!(
-                "buddy allocator: Cannot add region: maximum zones ({}) reached",
-                MAX_ZONES
-            );
+            error!("buddy allocator: Cannot add region: maximum zones ({MAX_ZONES}) reached");
             return Err(AllocError::NoMemory);
         }
 
@@ -256,10 +253,7 @@ impl<const PAGE_SIZE: usize> BuddyPageAllocator<PAGE_SIZE> {
         let aligned_size = aligned_end - aligned_start;
 
         if aligned_size == 0 || aligned_size < PAGE_SIZE {
-            warn!(
-                "buddy allocator: Aligned size is too small: {:#x}, skipping region",
-                aligned_size
-            );
+            warn!("buddy allocator: Aligned size is too small: {aligned_size:#x}, skipping region");
             return Err(AllocError::InvalidParam);
         }
 
@@ -337,13 +331,13 @@ impl<const PAGE_SIZE: usize> BuddyPageAllocator<PAGE_SIZE> {
     pub fn print_zone_info(&self) {
         info!("========== Buddy Allocator Zones Info ==========");
         info!("Total zones: {}", self.num_zones);
-        info!("Page size: {:#x} ({})", PAGE_SIZE, PAGE_SIZE);
+        info!("Page size: {PAGE_SIZE:#x} ({PAGE_SIZE})");
         info!("");
 
         for i in 0..self.num_zones {
             let zone = &self.zones[i];
             let _zone_info = zone.zone_info();
-            info!("Zone {}:", i);
+            info!("Zone {i}:");
             info!(
                 "  Address range: [{:#x}, {:#x})",
                 _zone_info.start_addr, _zone_info.end_addr
@@ -472,10 +466,7 @@ impl<const PAGE_SIZE: usize> PageAllocator for BuddyPageAllocator<PAGE_SIZE> {
             #[cfg(feature = "tracking")]
             self.update_stats();
         } else {
-            warn!(
-                "buddy allocator: Dealloc pages at {:#x}: address not in any zone",
-                pos
-            );
+            warn!("buddy allocator: Dealloc pages at {pos:#x}: address not in any zone");
         }
     }
 
@@ -503,10 +494,7 @@ impl<const PAGE_SIZE: usize> PageAllocator for BuddyPageAllocator<PAGE_SIZE> {
                 Err(e) => Err(e),
             }
         } else {
-            warn!(
-                "buddy allocator: alloc_pages_at: address {:#x} not in any zone",
-                base
-            );
+            warn!("buddy allocator: alloc_pages_at: address {base:#x} not in any zone");
             Err(AllocError::InvalidParam)
         }
     }

@@ -227,7 +227,7 @@ impl<const PAGE_SIZE: usize> CompositePageAllocator<PAGE_SIZE> {
                 // Allocate this specific block
                 if let Err(_e) = self.buddy.alloc_pages_at(addr, block_pages, alignment) {
                     // Allocation failed, rollback
-                    warn!("Contiguous block allocation failed at {}, rolling back", i);
+                    warn!("Contiguous block allocation failed at {i}, rolling back");
                     #[allow(clippy::needless_range_loop)]
                     for j in 0..i {
                         let (dealloc_addr, dealloc_order) = parts[j];
@@ -247,9 +247,7 @@ impl<const PAGE_SIZE: usize> CompositePageAllocator<PAGE_SIZE> {
                 .sum();
             debug_assert!(
                 actual_pages >= num_pages,
-                "Allocated pages {} < requested pages {}",
-                actual_pages,
-                num_pages
+                "Allocated pages {actual_pages} < requested pages {num_pages}"
             );
 
             // Save metadata to tracker for proper deallocation
@@ -268,8 +266,7 @@ impl<const PAGE_SIZE: usize> CompositePageAllocator<PAGE_SIZE> {
                 return None;
             }
 
-            debug!("Contiguous block allocation succeeded: base_addr={:#x}, pages={}, parts={}, actual_pages={}",
-                  min_addr, num_pages, block_count, actual_pages);
+            debug!("Contiguous block allocation succeeded: base_addr={min_addr:#x}, pages={num_pages}, parts={block_count}, actual_pages={actual_pages}");
 
             return Some(min_addr);
         }
@@ -311,8 +308,7 @@ impl<const PAGE_SIZE: usize> PageAllocator for CompositePageAllocator<PAGE_SIZE>
             Err(_) => {
                 // Standard allocation failed, try contiguous block combination
                 debug!(
-                    "Standard allocation failed, trying contiguous block combination for {} pages",
-                    num_pages
+                    "Standard allocation failed, trying contiguous block combination for {num_pages} pages"
                 );
                 if let Some(addr) = self.try_combine_contiguous_blocks(num_pages, alignment) {
                     return Ok(addr);
@@ -341,10 +337,7 @@ impl<const PAGE_SIZE: usize> PageAllocator for CompositePageAllocator<PAGE_SIZE>
             for i in 0..info.part_count as usize {
                 let (addr, order) = info.parts[i];
                 let pages = 1usize << order;
-                debug!(
-                    "  Part {}: addr={:#x}, order={}, pages={}",
-                    i, addr, order, pages
-                );
+                debug!("  Part {i}: addr={addr:#x}, order={order}, pages={pages}");
                 self.buddy.dealloc_pages(addr, pages);
             }
 

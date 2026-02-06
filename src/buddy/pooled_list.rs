@@ -150,7 +150,7 @@ impl PooledLinkedList {
 
             Some(data)
         } else {
-            error!("Head node {} is corrupted", head_idx);
+            error!("Head node {head_idx} is corrupted");
             None
         }
     }
@@ -246,7 +246,7 @@ impl PooledLinkedList {
     ) -> bool {
         // Verify the node exists
         if pool.get_node(node_idx).is_none() {
-            warn!("Invalid node index {} for remove_with_prev", node_idx);
+            warn!("Invalid node index {node_idx} for remove_with_prev");
             return false;
         }
 
@@ -254,16 +254,16 @@ impl PooledLinkedList {
         if let Some(prev) = prev_idx {
             if let Some(prev_node) = pool.get_node(prev) {
                 if prev_node.next != Some(node_idx) {
-                    warn!("prev_idx {} does not point to node_idx {}", prev, node_idx);
+                    warn!("prev_idx {prev} does not point to node_idx {node_idx}");
                     return false;
                 }
             } else {
-                warn!("Invalid prev_idx {}", prev);
+                warn!("Invalid prev_idx {prev}");
                 return false;
             }
         } else if self.head != Some(node_idx) {
             // prev_idx is None means node should be head
-            warn!("prev_idx is None but node_idx {} is not head", node_idx);
+            warn!("prev_idx is None but node_idx {node_idx} is not head");
             return false;
         }
 

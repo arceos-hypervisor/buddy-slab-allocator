@@ -180,7 +180,7 @@ impl SlabNode {
 
         let offset = obj_addr - base;
         if offset % self.size_class.size() != 0 {
-            error!("Invalid object address: {:x}", obj_addr);
+            error!("Invalid object address: {obj_addr:x}");
             return None;
         }
 

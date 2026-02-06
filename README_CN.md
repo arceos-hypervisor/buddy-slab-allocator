@@ -151,6 +151,17 @@ cargo test --package buddy-slab-allocator --features log
 cargo test --package buddy-slab-allocator --features tracking
 ```
 
+## 性能测试
+
+此项目包含全面的性能测试，用于在各种条件下评估分配器的性能和稳定性。详细的中文说明请查看 `benches/README_CN.md`。
+
+```bash
+# 运行所有 benchmark
+cargo bench --features bench
+```
+
+详细使用方法请参考 `benches/README_CN.md`。
+
 ## 文档
 
 API 文档可在 [docs.rs](https://docs.rs/buddy-slab-allocator) 上查看。

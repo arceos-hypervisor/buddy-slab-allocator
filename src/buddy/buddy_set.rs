@@ -179,10 +179,7 @@ impl<const PAGE_SIZE: usize> BuddySet<PAGE_SIZE> {
             // Verify alignment: address must be exact multiple of block_size
             assert!(
                 current_addr & (block_size - 1) == 0,
-                "Block address {:#x} not aligned to block size {:#x} (order {})",
-                current_addr,
-                block_size,
-                order
+                "Block address {current_addr:#x} not aligned to block size {block_size:#x} (order {order})"
             );
 
             // Construct and add the block

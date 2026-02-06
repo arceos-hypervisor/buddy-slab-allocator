@@ -5,7 +5,7 @@
 use core::cmp::PartialOrd;
 
 /// Maximum number of memory zones supported
-pub const MAX_ZONES: usize = 10;
+pub const MAX_ZONES: usize = 32;
 
 /// Maximum order supported
 pub const DEFAULT_MAX_ORDER: usize = 28; // Support up to 256GB allocations (2^28 * 4KB)

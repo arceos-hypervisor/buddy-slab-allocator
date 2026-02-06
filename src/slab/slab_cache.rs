@@ -241,10 +241,7 @@ impl SlabCache {
                 let actually_freed = node.dealloc_object(obj_idx);
                 (node.is_empty() && actually_freed, actually_freed)
             } else {
-                error!(
-                    "Invalid address {:x} in slab at {:x}: not a valid object",
-                    obj_addr, slab_base
-                );
+                error!("Invalid address {obj_addr:x} in slab at {slab_base:x}: not a valid object");
                 return (0, true); // Not a double-free, just invalid address (treat as no-op)
             };
 

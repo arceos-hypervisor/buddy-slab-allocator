@@ -235,8 +235,7 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
                     // If it fails, it's a real error (e.g., out of memory)
                     // Log for debugging
                     error!(
-                        "global allocator: Slab allocator failed for layout {:?}, error: {:?}, falling back to page allocator",
-                        layout, e
+                        "global allocator: Slab allocator failed for layout {layout:?}, error: {e:?}, falling back to page allocator"
                     );
                     return Err(e);
                 }

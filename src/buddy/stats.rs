@@ -76,7 +76,7 @@ impl MemoryStatsReporter {
             );
 
             error!("Overall Memory State:");
-            error!("  Total zones: {}", num_zones);
+            error!("  Total zones: {num_zones}");
             error!(
                 "  Total pages: {} ({} KB)",
                 total_stats.total_pages,
@@ -95,7 +95,7 @@ impl MemoryStatsReporter {
             error!("========================================");
 
             for (i, zone_info) in zone_infos.iter().take(num_zones).enumerate() {
-                error!("Zone {}:", i);
+                error!("Zone {i}:");
                 error!(
                     "  Range: [{:#x}, {:#x})",
                     zone_info.start_addr, zone_info.end_addr

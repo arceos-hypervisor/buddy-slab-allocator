@@ -151,6 +151,17 @@ cargo test --package buddy-slab-allocator --features log
 cargo test --package buddy-slab-allocator --features tracking
 ```
 
+## Benchmarking
+
+This project includes comprehensive benchmarks to evaluate performance and stability under various conditions. For detailed instructions, see `benches/README.md`.
+
+```bash
+# Run all benchmarks
+cargo bench --features bench
+```
+
+For detailed usage instructions, refer to `benches/README.md`.
+
 ## Documentation
 
 API documentation is available on [docs.rs](https://docs.rs/buddy-slab-allocator).
