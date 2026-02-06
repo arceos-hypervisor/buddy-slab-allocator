@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-02-06
+
+### Added
+- Comprehensive benchmark suite with criterion
+- Benchmark documentation in Chinese (`benches/README_CN.md`)
+- Benchmark workflow in CI with Rust 1.93.0 toolchain for compatibility
+
+### Changed
+- Increased `MAX_ZONES` from 16 to 32 for more flexible memory region management
+- Improved documentation in README with benchmark usage instructions
+
+
 ## [0.1.0] - 2025-01-30
 
 ### Added
@@ -42,5 +54,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - DMA32 pages test cases
 - Comprehensive edge case coverage
 
-## [Unreleased]: https://github.com/arceos-hypervisor/buddy-slab-allocator/compare/v0.1.0...HEAD
+## [Unreleased]: https://github.com/arceos-hypervisor/buddy-slab-allocator/compare/v0.1.1...HEAD
+## [0.1.1]: https://github.com/arceos-hypervisor/buddy-slab-allocator/compare/v0.1.0...v0.1.1
 ## [0.1.0]: https://github.com/arceos-hypervisor/buddy-slab-allocator/releases/tag/v0.1.0
