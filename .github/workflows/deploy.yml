@@ -3,10 +3,10 @@ name: Deploy
 on:
   push:
     branches:
-      - '**'
+      - "**"
     tags-ignore:
-      - 'v*'
-      - 'v*-pre.*'
+      - "v*"
+      - "v*-pre.*"
   pull_request:
 
 permissions:
@@ -15,7 +15,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: 'pages'
+  group: "pages"
   cancel-in-progress: false
 
 jobs:
@@ -34,16 +34,16 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install Rust 1.93.0
+      - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.93.0"
+          toolchain: nightly-2026-02-25
 
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
 
       - name: Build benchmarks
-        run: cargo +1.93.0 bench --features bench --no-run
+        run: cargo bench --no-run
 
   build-doc:
     name: Build documentation
@@ -56,7 +56,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly-2025-04-01
+          toolchain: nightly-2026-02-25
 
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
