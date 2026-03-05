@@ -356,12 +356,12 @@ fn test_error_conditions() {
 
     // Test invalid parameter
     let result = allocator.alloc_pages(0, PAGE_SIZE);
-    assert_eq!(result, Err(AllocError::InvalidParam));
+    assert!(matches!(result, Err(AllocError::InvalidParam)));
 
     // Test allocation too large
     let huge_pages = TEST_HEAP_SIZE / PAGE_SIZE + 1000;
     let result = allocator.alloc_pages(huge_pages, PAGE_SIZE);
-    assert_eq!(result, Err(AllocError::NoMemory));
+    assert!(matches!(result, Err(AllocError::NoMemory)));
 
     dealloc_test_heap(heap_ptr, heap_layout);
 }

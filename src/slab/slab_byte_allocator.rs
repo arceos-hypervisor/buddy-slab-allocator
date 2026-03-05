@@ -9,7 +9,7 @@ use core::ptr::NonNull;
 #[cfg(feature = "log")]
 use log::warn;
 
-use crate::{AllocError, AllocResult, ByteAllocator};
+use crate::{AllocError, AllocResult, BaseAllocator, ByteAllocator};
 
 // Re-export public types from sibling modules
 pub use super::slab_cache::SlabCache;
@@ -148,6 +148,15 @@ impl<const PAGE_SIZE: usize> SlabByteAllocator<PAGE_SIZE> {
 impl<const PAGE_SIZE: usize> Default for SlabByteAllocator<PAGE_SIZE> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// This implementation is never called, so no-op implementations are fine
+impl<const PAGE_SIZE: usize> BaseAllocator for SlabByteAllocator<PAGE_SIZE> {
+    fn init(&mut self, _start: usize, _size: usize) {}
+
+    fn add_memory(&mut self, _start: usize, _size: usize) -> AllocResult {
+        Ok(())
     }
 }
 
