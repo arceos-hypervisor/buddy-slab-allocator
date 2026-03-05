@@ -9,11 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.0] - 2026-03-05
 
-### Removed
-- Removed deprecated `bench` feature flag from `Cargo.toml`
+### Added
+- Added `axallocator = "0.2"` as a dependency
 
 ### Changed
-- Version bump to 0.2.0 for crates.io release
+- `AllocError`, `AllocResult`, `BaseAllocator`, `ByteAllocator`, `PageAllocator`, and `IdAllocator` are now re-exported from `axallocator` instead of being defined locally
+- Updated Rust toolchain to `nightly-2026-02-25`
+- Benchmarks no longer require `--features bench`; `criterion` and `rand` moved to `[dev-dependencies]`
+
+### Removed
+- Removed locally defined allocator trait and error type definitions (now provided by `axallocator`)
+- Removed the deprecated `bench` feature flag
 
 ## [0.1.1] - 2026-02-06
 
