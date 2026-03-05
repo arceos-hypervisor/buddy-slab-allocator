@@ -6,6 +6,7 @@
 use core::alloc::Layout;
 use core::ptr::NonNull;
 
+use axallocator::BaseAllocator;
 #[cfg(feature = "log")]
 use log::warn;
 
@@ -148,6 +149,14 @@ impl<const PAGE_SIZE: usize> SlabByteAllocator<PAGE_SIZE> {
 impl<const PAGE_SIZE: usize> Default for SlabByteAllocator<PAGE_SIZE> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl<const PAGE_SIZE: usize> BaseAllocator for SlabByteAllocator<PAGE_SIZE> {
+    fn init(&mut self, _start: usize, _size: usize) {}
+
+    fn add_memory(&mut self, _start: usize, _size: usize) -> AllocResult {
+        Ok(())
     }
 }
 

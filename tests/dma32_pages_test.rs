@@ -49,13 +49,8 @@ fn test_alloc_dma32_pages_uninitialized() {
     // Try to allocate pages - should fail because allocator is not initialized
     let result = allocator.alloc_dma32_pages(1, PAGE_SIZE);
     assert!(
-        result.is_err(),
-        "Expected error when allocating from uninitialized allocator"
-    );
-    assert_eq!(
-        result.unwrap_err(),
-        AllocError::NoMemory,
-        "Expected NoMemory error"
+        matches!(result, Err(AllocError::NoMemory)),
+        "Expected NoMemory error when allocating from uninitialized allocator"
     );
 }
 
