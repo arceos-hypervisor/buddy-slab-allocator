@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-03-05
+
+### Added
+- Added `axallocator = "0.2"` as a dependency
+
+### Changed
+- `AllocError`, `AllocResult`, `BaseAllocator`, `ByteAllocator`, `PageAllocator`, and `IdAllocator` are now re-exported from `axallocator` instead of being defined locally
+- Updated Rust toolchain to `nightly-2026-02-25`
+- Benchmarks no longer require `--features bench`; `criterion` and `rand` moved to `[dev-dependencies]`
+
+### Removed
+- Removed locally defined allocator trait and error type definitions (now provided by `axallocator`)
+- Removed the deprecated `bench` feature flag
+
 ## [0.1.1] - 2026-02-06
 
 ### Added
@@ -54,6 +68,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - DMA32 pages test cases
 - Comprehensive edge case coverage
 
-## [Unreleased]: https://github.com/arceos-hypervisor/buddy-slab-allocator/compare/v0.1.1...HEAD
+## [Unreleased]: https://github.com/arceos-hypervisor/buddy-slab-allocator/compare/v0.2.0...HEAD
+## [0.2.0]: https://github.com/arceos-hypervisor/buddy-slab-allocator/compare/v0.1.1...v0.2.0
 ## [0.1.1]: https://github.com/arceos-hypervisor/buddy-slab-allocator/compare/v0.1.0...v0.1.1
 ## [0.1.0]: https://github.com/arceos-hypervisor/buddy-slab-allocator/releases/tag/v0.1.0
