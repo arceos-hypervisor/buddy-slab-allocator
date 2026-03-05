@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.0] - 2026-03-05
 
+### Removed
+- Removed deprecated `bench` feature flag from `Cargo.toml`
+
 ### Changed
 - Version bump to 0.2.0 for crates.io release
 
