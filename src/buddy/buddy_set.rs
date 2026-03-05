@@ -161,7 +161,7 @@ impl<const PAGE_SIZE: usize> BuddySet<PAGE_SIZE> {
             let mut max_order_by_alignment = 0;
             for test_order in 0..=self.max_order() {
                 let block_size = (1 << test_order) * PAGE_SIZE;
-                if current_addr % block_size == 0 {
+                if current_addr.is_multiple_of(block_size) {
                     max_order_by_alignment = test_order;
                 } else {
                     break;
@@ -266,7 +266,7 @@ impl<const PAGE_SIZE: usize> BuddySet<PAGE_SIZE> {
 
                 // Verify alignment requirement
                 assert!(
-                    block.addr % alignment == 0,
+                    block.addr.is_multiple_of(alignment),
                     "Allocated address {:#x} is not aligned to {:#x} bytes ",
                     block.addr,
                     alignment
@@ -470,7 +470,7 @@ impl<const PAGE_SIZE: usize> BuddySet<PAGE_SIZE> {
         }
 
         // Check alignment requirement
-        if base % alignment != 0 {
+        if !base.is_multiple_of(alignment) {
             error!(
                 "zone {}: Address {:#x} is not aligned to {:#x}",
                 self.zone_id, base, alignment

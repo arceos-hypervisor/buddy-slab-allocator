@@ -2,67 +2,42 @@
 
 本目录包含 buddy-slab-allocator 项目的性能测试和稳定性测试。
 
-## 前置条件
-
-运行 benchmark 需要启用 `bench` feature，该 feature 会添加 `criterion` 和 `rand` 依赖。
-
-**重要提示**：由于 benchmark 依赖的 `zerocopy` 库需要较新的 Rust 特性，请使用 **Rust 1.93.0 或更高版本**运行 benchmark：
-
-```bash
-# 安装 Rust 1.93.0
-rustup install 1.93.0
-
-# 使用指定版本运行 benchmark
-cargo +1.93.0 bench --features bench
-```
-
-**注意**：主项目使用 `nightly-2025-04-01` 工具链进行开发和 CI，但 benchmark 需要使用 1.93.0+ 以避免依赖兼容性问题。
-
 ## 运行 Benchmark
 
-**推荐使用 Rust 1.93.0+**：
-
 ```bash
-# 一次性使用（推荐）
-cargo +1.93.0 bench --features bench
-```
-
-### 运行所有 benchmark
-
-```bash
-cargo +1.93.0 bench --features bench
+cargo bench
 ```
 
 ### 运行特定 benchmark suite
 
 ```bash
 # 测试全局分配器
-cargo +1.93.0 bench --features bench --bench global_allocator
+cargo bench --bench global_allocator
 
 # 测试 Buddy 页分配器
-cargo +1.93.0 bench --features bench --bench buddy_allocator
+cargo bench --bench buddy_allocator
 
 # 测试 Slab 字节分配器
-cargo +1.93.0 bench --features bench --bench slab_allocator
+cargo bench --bench slab_allocator
 
 # 测试稳定性
-cargo +1.93.0 bench --features bench --bench stability
+cargo bench --bench stability
 ```
 
 ### 高级选项
 
 ```bash
 # 启用 memory tracking 功能运行 benchmark
-cargo +1.93.0 bench --features "bench tracking"
+cargo bench --features tracking
 
 # 保存基线用于后续对比
-cargo +1.93.0 bench --features bench -- --save-baseline main
+cargo bench -- --save-baseline main
 
 # 与基线对比
-cargo +1.93.0 bench --features bench -- --baseline main
+cargo bench -- --baseline main
 
 # 只运行特定 benchmark
-cargo +1.93.0 bench --features bench global_alloc_small
+cargo bench global_alloc_small
 ```
 
 ## Benchmark Suite 说明
@@ -264,18 +239,10 @@ criterion_main!(benches);
 
 ### Q: Benchmark 编译失败怎么办？
 
-A: 最常见的原因是 Rust 版本不兼容。请确保使用 **Rust 1.93.0 或更高版本**：
-
-```bash
-# 安装 Rust 1.93.0
-rustup install 1.93.0
-
-# 使用指定版本
-cargo +1.93.0 bench --features bench
-```
+A: 最常见的原因是 Rust 版本不兼容。请确保使用 **Rust 1.93.0 或更高版本**.
 
 如果仍然失败：
-1. 清理并重新构建：`cargo clean && cargo +1.93.0 build --features bench`
+1. 清理并重新构建：`cargo clean && cargo build`
 2. 检查网络连接和依赖下载
 3. 更新 rustup：`rustup update`
 
@@ -291,10 +258,10 @@ A: 可以：
 A: 使用 Criterion 的基线功能：
 ```bash
 # 第一次运行，保存基线
-cargo +1.93.0 bench --features bench -- --save-baseline v1
+cargo bench -- --save-baseline v1
 
 # 修改代码后，对比基线
-cargo +1.93.0 bench --features bench -- --baseline v1
+cargo bench -- --baseline v1
 ```
 
 ### Q: Benchmark 结果不稳定怎么办？

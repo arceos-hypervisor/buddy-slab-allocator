@@ -157,7 +157,7 @@ This project includes comprehensive benchmarks to evaluate performance and stabi
 
 ```bash
 # Run all benchmarks
-cargo bench --features bench
+cargo bench
 ```
 
 For detailed usage instructions, refer to `benches/README.md`.

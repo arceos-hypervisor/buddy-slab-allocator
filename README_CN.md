@@ -157,7 +157,7 @@ cargo test --package buddy-slab-allocator --features tracking
 
 ```bash
 # 运行所有 benchmark
-cargo bench --features bench
+cargo bench
 ```
 
 详细使用方法请参考 `benches/README_CN.md`。
