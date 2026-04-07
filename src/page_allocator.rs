@@ -234,7 +234,7 @@ impl<const PAGE_SIZE: usize> CompositePageAllocator<PAGE_SIZE> {
                 );
 
                 // Allocate this specific block
-                if let Err(_e) = self.buddy.alloc_pages_at(addr, block_pages, alignment) {
+                if let Err(_e) = self.buddy.alloc_pages(block_pages, alignment) {
                     // Allocation failed, rollback
                     warn!("Contiguous block allocation failed at {i}, rolling back");
                     #[allow(clippy::needless_range_loop)]
@@ -356,18 +356,6 @@ impl<const PAGE_SIZE: usize> CompositePageAllocator<PAGE_SIZE> {
                 self.buddy.dealloc_pages(pos, num_pages.next_power_of_two());
             }
         }
-    }
-
-    /// Allocate contiguous memory pages at a specific address.
-    ///
-    /// Delegates to buddy allocator.
-    pub fn alloc_pages_at(
-        &mut self,
-        base: usize,
-        num_pages: usize,
-        alignment: usize,
-    ) -> AllocResult<usize> {
-        self.buddy.alloc_pages_at(base, num_pages, alignment)
     }
 
     /// Return total number of memory pages.

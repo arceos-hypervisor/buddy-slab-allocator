@@ -443,35 +443,6 @@ impl<const PAGE_SIZE: usize> BuddyPageAllocator<PAGE_SIZE> {
         }
     }
 
-    pub fn alloc_pages_at(
-        &mut self,
-        base: usize,
-        num_pages: usize,
-        alignment: usize,
-    ) -> AllocResult<usize> {
-        // Try to expand node pool if we are close to exhaustion
-        self.maybe_expand_node_pool();
-
-        if let Some(zone_idx) = self.find_zone_for_addr(base) {
-            match self.zones[zone_idx].alloc_pages_at(
-                &mut self.global_node_pool,
-                base,
-                num_pages,
-                alignment,
-            ) {
-                Ok(addr) => {
-                    #[cfg(feature = "tracking")]
-                    self.update_stats();
-                    Ok(addr)
-                }
-                Err(e) => Err(e),
-            }
-        } else {
-            warn!("buddy allocator: alloc_pages_at: address {base:#x} not in any zone");
-            Err(AllocError::InvalidParam)
-        }
-    }
-
     pub fn total_pages(&self) -> usize {
         #[cfg(feature = "tracking")]
         return self.stats.total_pages;

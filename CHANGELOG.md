@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed the external allocator-interface dependency and restored crate-local `AllocError` / `AllocResult`
 - Stopped exporting the generic allocator traits `BaseAllocator`, `ByteAllocator`, `PageAllocator`, and `IdAllocator`
 - Public allocator APIs now favor concrete allocator methods directly instead of requiring trait imports
+- Removed `alloc_pages_at` because the current buddy/slab architecture does not stably support fixed-address allocation
 
 ### Removed
 - Removed the external allocator-interface crate from `[dependencies]`

@@ -398,33 +398,6 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
 }
 
 impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
-    pub fn alloc_pages_at(
-        &mut self,
-        base: usize,
-        num_pages: usize,
-        alignment: usize,
-    ) -> AllocResult<usize> {
-        if !self.initialized.load(Ordering::SeqCst) {
-            return Err(AllocError::NoMemory);
-        }
-
-        let addr = self
-            .page_allocator
-            .alloc_pages_at(base, num_pages, alignment)?;
-
-        #[cfg(feature = "tracking")]
-        {
-            self.stats
-                .used_pages
-                .fetch_add(num_pages, Ordering::Relaxed);
-            self.stats
-                .free_pages
-                .fetch_sub(num_pages, Ordering::Relaxed);
-        }
-
-        Ok(addr)
-    }
-
     pub fn total_pages(&self) -> usize {
         self.page_allocator.total_pages()
     }
