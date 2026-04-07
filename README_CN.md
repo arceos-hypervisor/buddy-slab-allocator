@@ -78,8 +78,7 @@ page_alloc.dealloc_pages(addr, 4);
 
 ```rust
 use buddy_slab_allocator::SlabByteAllocator;
-use buddy_slab_allocator::page_allocator::PageAllocatorForSlab;
-use buddy_slab_allocator::CompositePageAllocator;
+use buddy_slab_allocator::{CompositePageAllocator, PageAllocatorForSlab};
 use core::alloc::Layout;
 
 const PAGE_SIZE: usize = 0x1000;
@@ -87,13 +86,14 @@ let mut page_alloc = CompositePageAllocator::<PAGE_SIZE>::new();
 page_alloc.init(0x8000_0000, 16 * 1024 * 1024).unwrap();
 
 let mut slab_alloc = SlabByteAllocator::<PAGE_SIZE>::new();
+slab_alloc.set_page_allocator(&mut page_alloc as *mut _ as *mut dyn PageAllocatorForSlab);
 
 // 小对象分配快速
 let layout = Layout::from_size_align(64, 8).unwrap();
-let ptr = slab_alloc.alloc(&mut page_alloc, layout).unwrap();
+let ptr = slab_alloc.alloc(layout).unwrap();
 
 // 释放内存
-slab_alloc.dealloc(&mut page_alloc, ptr, layout);
+slab_alloc.dealloc(ptr, layout);
 ```
 
 ## 特性详解

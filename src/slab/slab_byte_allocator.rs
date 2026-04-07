@@ -8,7 +8,7 @@ use core::ptr::NonNull;
 
 use log::warn;
 
-use crate::{AllocError, AllocResult, BaseAllocator, ByteAllocator};
+use crate::{AllocError, AllocResult};
 
 // Re-export public types from sibling modules
 pub use super::slab_cache::SlabCache;
@@ -142,25 +142,8 @@ impl<const PAGE_SIZE: usize> SlabByteAllocator<PAGE_SIZE> {
     pub fn set_page_allocator(&mut self, page_allocator: *mut dyn PageAllocatorForSlab) {
         self.page_allocator = Some(page_allocator);
     }
-}
 
-impl<const PAGE_SIZE: usize> Default for SlabByteAllocator<PAGE_SIZE> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-// This implementation is never called, so no-op implementations are fine
-impl<const PAGE_SIZE: usize> BaseAllocator for SlabByteAllocator<PAGE_SIZE> {
-    fn init(&mut self, _start: usize, _size: usize) {}
-
-    fn add_memory(&mut self, _start: usize, _size: usize) -> AllocResult {
-        Ok(())
-    }
-}
-
-impl<const PAGE_SIZE: usize> ByteAllocator for SlabByteAllocator<PAGE_SIZE> {
-    fn alloc(&mut self, layout: Layout) -> AllocResult<NonNull<u8>> {
+    pub fn alloc(&mut self, layout: Layout) -> AllocResult<NonNull<u8>> {
         let size_class = SizeClass::from_layout(layout).ok_or(AllocError::InvalidParam)?;
 
         let Some(page_allocator_ptr) = self.page_allocator else {
@@ -177,7 +160,7 @@ impl<const PAGE_SIZE: usize> ByteAllocator for SlabByteAllocator<PAGE_SIZE> {
         Ok(unsafe { NonNull::new_unchecked(obj_addr as *mut u8) })
     }
 
-    fn dealloc(&mut self, ptr: NonNull<u8>, layout: Layout) {
+    pub fn dealloc(&mut self, ptr: NonNull<u8>, layout: Layout) {
         let size_class = SizeClass::from_layout(layout).expect("Invalid layout");
         let obj_addr = ptr.as_ptr() as usize;
 
@@ -200,16 +183,22 @@ impl<const PAGE_SIZE: usize> ByteAllocator for SlabByteAllocator<PAGE_SIZE> {
         self.total_bytes = self.total_bytes.saturating_sub(freed_bytes);
     }
 
-    fn total_bytes(&self) -> usize {
+    pub fn total_bytes(&self) -> usize {
         self.total_bytes
     }
 
-    fn used_bytes(&self) -> usize {
+    pub fn used_bytes(&self) -> usize {
         self.allocated_bytes
     }
 
-    fn available_bytes(&self) -> usize {
+    pub fn available_bytes(&self) -> usize {
         self.total_bytes.saturating_sub(self.allocated_bytes)
+    }
+}
+
+impl<const PAGE_SIZE: usize> Default for SlabByteAllocator<PAGE_SIZE> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

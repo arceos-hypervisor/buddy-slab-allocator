@@ -5,7 +5,7 @@
 
 extern crate alloc;
 
-use crate::{AllocError, AllocResult, BaseAllocator, ByteAllocator, PageAllocator};
+use crate::{AllocError, AllocResult};
 use core::alloc::Layout;
 use core::ptr::NonNull;
 #[cfg(feature = "tracking")]
@@ -243,8 +243,9 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
 
         let pages_needed = layout.size().div_ceil(PAGE_SIZE);
 
-        let addr =
-            PageAllocator::alloc_pages(&mut self.page_allocator, pages_needed, layout.align())?;
+        let addr = self
+            .page_allocator
+            .alloc_pages(pages_needed, layout.align())?;
         let ptr = unsafe { NonNull::new_unchecked(addr as *mut u8) };
 
         #[cfg(feature = "tracking")]
@@ -268,7 +269,7 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
     /// # Examples
     ///
     /// ```no_run
-    /// use buddy_slab_allocator::{GlobalAllocator, PageAllocator};
+    /// use buddy_slab_allocator::GlobalAllocator;
     ///
     /// const PAGE_SIZE: usize = 0x1000;
     /// let mut allocator = GlobalAllocator::<PAGE_SIZE>::new();
@@ -282,7 +283,7 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
             return Err(AllocError::NoMemory);
         }
 
-        let addr = PageAllocator::alloc_pages(&mut self.page_allocator, num_pages, alignment)?;
+        let addr = self.page_allocator.alloc_pages(num_pages, alignment)?;
 
         // Update statistics
         #[cfg(feature = "tracking")]
@@ -318,11 +319,8 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
 
         // This memory was allocated by page allocator
         let pages_needed = layout.size().div_ceil(PAGE_SIZE);
-        PageAllocator::dealloc_pages(
-            &mut self.page_allocator,
-            ptr.as_ptr() as usize,
-            pages_needed,
-        );
+        self.page_allocator
+            .dealloc_pages(ptr.as_ptr() as usize, pages_needed);
         #[cfg(feature = "tracking")]
         {
             saturating_sub_atomic(&self.stats.used_pages, pages_needed);
@@ -339,7 +337,7 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
             return;
         }
 
-        PageAllocator::dealloc_pages(&mut self.page_allocator, pos, num_pages);
+        self.page_allocator.dealloc_pages(pos, num_pages);
 
         // Update statistics
         #[cfg(feature = "tracking")]
@@ -400,6 +398,45 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
 }
 
 impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
+    pub fn alloc_pages_at(
+        &mut self,
+        base: usize,
+        num_pages: usize,
+        alignment: usize,
+    ) -> AllocResult<usize> {
+        if !self.initialized.load(Ordering::SeqCst) {
+            return Err(AllocError::NoMemory);
+        }
+
+        let addr = self
+            .page_allocator
+            .alloc_pages_at(base, num_pages, alignment)?;
+
+        #[cfg(feature = "tracking")]
+        {
+            self.stats
+                .used_pages
+                .fetch_add(num_pages, Ordering::Relaxed);
+            self.stats
+                .free_pages
+                .fetch_sub(num_pages, Ordering::Relaxed);
+        }
+
+        Ok(addr)
+    }
+
+    pub fn total_pages(&self) -> usize {
+        self.page_allocator.total_pages()
+    }
+
+    pub fn used_pages(&self) -> usize {
+        self.page_allocator.used_pages()
+    }
+
+    pub fn available_pages(&self) -> usize {
+        self.page_allocator.available_pages()
+    }
+
     /// Get memory statistics
     #[cfg(feature = "tracking")]
     pub fn get_stats(&self) -> UsageStats {
@@ -416,108 +453,5 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
 impl<const PAGE_SIZE: usize> Default for GlobalAllocator<PAGE_SIZE> {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl<const PAGE_SIZE: usize> BaseAllocator for GlobalAllocator<PAGE_SIZE> {
-    fn init(&mut self, start: usize, size: usize) {
-        self.page_allocator.init(start, size);
-    }
-
-    fn add_memory(&mut self, start: usize, size: usize) -> AllocResult {
-        self.page_allocator.add_memory(start, size)
-    }
-}
-
-impl<const PAGE_SIZE: usize> PageAllocator for GlobalAllocator<PAGE_SIZE> {
-    const PAGE_SIZE: usize = PAGE_SIZE;
-
-    fn alloc_pages(&mut self, num_pages: usize, alignment: usize) -> AllocResult<usize> {
-        if !self.initialized.load(Ordering::SeqCst) {
-            return Err(AllocError::NoMemory);
-        }
-
-        let addr = <CompositePageAllocator<PAGE_SIZE> as PageAllocator>::alloc_pages(
-            &mut self.page_allocator,
-            num_pages,
-            alignment,
-        )?;
-
-        // Update statistics
-        #[cfg(feature = "tracking")]
-        {
-            self.stats
-                .used_pages
-                .fetch_add(num_pages, Ordering::Relaxed);
-            self.stats
-                .free_pages
-                .fetch_sub(num_pages, Ordering::Relaxed);
-        }
-
-        Ok(addr)
-    }
-
-    fn dealloc_pages(&mut self, pos: usize, num_pages: usize) {
-        if !self.initialized.load(Ordering::SeqCst) {
-            return;
-        }
-
-        <CompositePageAllocator<PAGE_SIZE> as PageAllocator>::dealloc_pages(
-            &mut self.page_allocator,
-            pos,
-            num_pages,
-        );
-
-        // Update statistics
-        #[cfg(feature = "tracking")]
-        {
-            saturating_sub_atomic(&self.stats.used_pages, num_pages);
-            self.stats
-                .free_pages
-                .fetch_add(num_pages, Ordering::Relaxed);
-        }
-    }
-
-    fn alloc_pages_at(
-        &mut self,
-        base: usize,
-        num_pages: usize,
-        alignment: usize,
-    ) -> AllocResult<usize> {
-        if !self.initialized.load(Ordering::SeqCst) {
-            return Err(AllocError::NoMemory);
-        }
-
-        let addr = <CompositePageAllocator<PAGE_SIZE> as PageAllocator>::alloc_pages_at(
-            &mut self.page_allocator,
-            base,
-            num_pages,
-            alignment,
-        )?;
-
-        // Update statistics
-        #[cfg(feature = "tracking")]
-        {
-            self.stats
-                .used_pages
-                .fetch_add(num_pages, Ordering::Relaxed);
-            self.stats
-                .free_pages
-                .fetch_sub(num_pages, Ordering::Relaxed);
-        }
-
-        Ok(addr)
-    }
-
-    fn total_pages(&self) -> usize {
-        self.page_allocator.total_pages()
-    }
-
-    fn used_pages(&self) -> usize {
-        self.page_allocator.used_pages()
-    }
-
-    fn available_pages(&self) -> usize {
-        self.page_allocator.available_pages()
     }
 }

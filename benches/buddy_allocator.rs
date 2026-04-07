@@ -3,9 +3,7 @@
 //! This benchmark suite tests the performance and stability of the Buddy allocator
 //! which handles page-level allocations with automatic merging.
 
-use buddy_slab_allocator::{
-    BaseAllocator, BuddyPageAllocator, CompositePageAllocator, PageAllocator,
-};
+use buddy_slab_allocator::{BuddyPageAllocator, CompositePageAllocator};
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use rand::{RngExt, SeedableRng};
 use std::alloc::Layout;

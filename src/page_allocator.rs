@@ -1,7 +1,7 @@
 //! Page allocator with contiguous block combination support.
 
 use crate::buddy::{BuddyPageAllocator, DEFAULT_MAX_ORDER};
-use crate::{AllocError, AllocResult, BaseAllocator, PageAllocator};
+use crate::{AllocError, AllocResult};
 
 use log::{debug, warn};
 
@@ -118,6 +118,16 @@ impl<const PAGE_SIZE: usize> CompositePageAllocator<PAGE_SIZE> {
     /// This is a thin wrapper over the buddy allocator's lowmem allocation.
     pub fn alloc_pages_lowmem(&mut self, num_pages: usize, alignment: usize) -> AllocResult<usize> {
         self.buddy.alloc_pages_lowmem(num_pages, alignment)
+    }
+
+    /// Initialize the allocator with a free memory region.
+    pub fn init(&mut self, start: usize, size: usize) {
+        self.buddy.init(start, size);
+    }
+
+    /// Add a free memory region to the allocator.
+    pub fn add_memory(&mut self, start: usize, size: usize) -> AllocResult<()> {
+        self.buddy.add_memory(start, size)
     }
 
     /// Try to find and allocate contiguous small blocks from buddy free lists.
@@ -285,12 +295,8 @@ impl<const PAGE_SIZE: usize> CompositePageAllocator<PAGE_SIZE> {
     fn print_alloc_failure_stats(&self, _num_pages: usize, _alignment: usize) {
         // No-op when tracking is disabled
     }
-}
 
-impl<const PAGE_SIZE: usize> PageAllocator for CompositePageAllocator<PAGE_SIZE> {
-    const PAGE_SIZE: usize = PAGE_SIZE;
-
-    fn alloc_pages(&mut self, num_pages: usize, alignment: usize) -> AllocResult<usize> {
+    pub fn alloc_pages(&mut self, num_pages: usize, alignment: usize) -> AllocResult<usize> {
         if num_pages == 0 {
             return Err(AllocError::InvalidParam);
         }
@@ -320,7 +326,7 @@ impl<const PAGE_SIZE: usize> PageAllocator for CompositePageAllocator<PAGE_SIZE>
         Ok(base_addr)
     }
 
-    fn dealloc_pages(&mut self, pos: usize, num_pages: usize) {
+    pub fn dealloc_pages(&mut self, pos: usize, num_pages: usize) {
         if num_pages == 0 {
             return;
         }
@@ -355,7 +361,7 @@ impl<const PAGE_SIZE: usize> PageAllocator for CompositePageAllocator<PAGE_SIZE>
     /// Allocate contiguous memory pages at a specific address.
     ///
     /// Delegates to buddy allocator.
-    fn alloc_pages_at(
+    pub fn alloc_pages_at(
         &mut self,
         base: usize,
         num_pages: usize,
@@ -365,17 +371,17 @@ impl<const PAGE_SIZE: usize> PageAllocator for CompositePageAllocator<PAGE_SIZE>
     }
 
     /// Return total number of memory pages.
-    fn total_pages(&self) -> usize {
+    pub fn total_pages(&self) -> usize {
         self.buddy.total_pages()
     }
 
     /// Return number of allocated memory pages.
-    fn used_pages(&self) -> usize {
+    pub fn used_pages(&self) -> usize {
         self.buddy.used_pages()
     }
 
     /// Return number of available memory pages.
-    fn available_pages(&self) -> usize {
+    pub fn available_pages(&self) -> usize {
         self.buddy.available_pages()
     }
 }
@@ -388,28 +394,16 @@ impl<const PAGE_SIZE: usize> CompositePageAllocator<PAGE_SIZE> {
     }
 }
 
-impl<const PAGE_SIZE: usize> BaseAllocator for CompositePageAllocator<PAGE_SIZE> {
-    /// Initialize the allocator with a free memory region.
-    fn init(&mut self, start: usize, size: usize) {
-        self.buddy.init(start, size);
-    }
-
-    /// Add a free memory region to the allocator.
-    fn add_memory(&mut self, start: usize, size: usize) -> AllocResult<()> {
-        self.buddy.add_memory(start, size)
-    }
-}
-
 // Implement PageAllocatorForSlab for CompositePageAllocator
 impl<const PAGE_SIZE: usize> crate::slab::PageAllocatorForSlab
     for CompositePageAllocator<PAGE_SIZE>
 {
     fn alloc_pages(&mut self, num_pages: usize, alignment: usize) -> AllocResult<usize> {
-        <Self as PageAllocator>::alloc_pages(self, num_pages, alignment)
+        Self::alloc_pages(self, num_pages, alignment)
     }
 
     fn dealloc_pages(&mut self, pos: usize, num_pages: usize) {
-        <Self as PageAllocator>::dealloc_pages(self, pos, num_pages)
+        Self::dealloc_pages(self, pos, num_pages)
     }
 }
 

@@ -10,8 +10,7 @@ extern crate buddy_slab_allocator;
 
 use alloc::vec::Vec;
 use buddy_slab_allocator::{
-    AllocError, BaseAllocator, ByteAllocator, CompositePageAllocator, GlobalAllocator,
-    PageAllocator, SlabByteAllocator,
+    AllocError, CompositePageAllocator, GlobalAllocator, PageAllocatorForSlab, SlabByteAllocator,
 };
 use core::alloc::Layout;
 
@@ -166,7 +165,7 @@ fn test_slab_allocator_basic() {
     slab_allocator.init();
 
     let page_alloc_ptr = &mut page_allocator as *mut CompositePageAllocator<PAGE_SIZE>
-        as *mut dyn buddy_slab_allocator::slab::PageAllocatorForSlab;
+        as *mut dyn PageAllocatorForSlab;
     slab_allocator.set_page_allocator(page_alloc_ptr);
 
     // Test various small allocations
@@ -199,7 +198,7 @@ fn test_slab_allocator_many_objects() {
     slab_allocator.init();
 
     let page_alloc_ptr = &mut page_allocator as *mut CompositePageAllocator<PAGE_SIZE>
-        as *mut dyn buddy_slab_allocator::slab::PageAllocatorForSlab;
+        as *mut dyn PageAllocatorForSlab;
     slab_allocator.set_page_allocator(page_alloc_ptr);
 
     // Allocate many small objects

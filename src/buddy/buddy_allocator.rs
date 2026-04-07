@@ -3,7 +3,7 @@
 //! Provides buddy allocator with support for multiple memory zones and
 //! a single shared global node pool for all zones and orders.
 
-use crate::{AllocError, AllocResult, BaseAllocator, PageAllocator};
+use crate::{AllocError, AllocResult};
 
 use log::{debug, error, info, warn};
 
@@ -288,6 +288,13 @@ impl<const PAGE_SIZE: usize> BuddyPageAllocator<PAGE_SIZE> {
         Ok(())
     }
 
+    pub fn add_memory(&mut self, start: usize, size: usize) -> AllocResult<()> {
+        self.add_memory_region(start, size)?;
+        #[cfg(feature = "tracking")]
+        self.update_stats();
+        Ok(())
+    }
+
     /// Find the zone that contains the given address
     pub fn find_zone_for_addr(&self, addr: usize) -> Option<usize> {
         (0..self.num_zones).find(|&i| self.zones[i].addr_in_zone(addr))
@@ -377,41 +384,8 @@ impl<const PAGE_SIZE: usize> BuddyPageAllocator<PAGE_SIZE> {
     pub fn print_alloc_failure_stats(&self, _num_pages: usize, _alignment: usize) {
         // No-op when tracking is disabled
     }
-}
 
-impl<const PAGE_SIZE: usize> crate::slab::PageAllocatorForSlab for BuddyPageAllocator<PAGE_SIZE> {
-    fn alloc_pages(&mut self, num_pages: usize, alignment: usize) -> AllocResult<usize> {
-        <Self as PageAllocator>::alloc_pages(self, num_pages, alignment)
-    }
-
-    fn dealloc_pages(&mut self, pos: usize, num_pages: usize) {
-        <Self as PageAllocator>::dealloc_pages(self, pos, num_pages);
-    }
-}
-
-impl<const PAGE_SIZE: usize> Default for BuddyPageAllocator<PAGE_SIZE> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<const PAGE_SIZE: usize> BaseAllocator for BuddyPageAllocator<PAGE_SIZE> {
-    fn init(&mut self, start: usize, size: usize) {
-        self.bootstrap(start, size);
-    }
-
-    fn add_memory(&mut self, start: usize, size: usize) -> AllocResult<()> {
-        self.add_memory_region(start, size)?;
-        #[cfg(feature = "tracking")]
-        self.update_stats();
-        Ok(())
-    }
-}
-
-impl<const PAGE_SIZE: usize> PageAllocator for BuddyPageAllocator<PAGE_SIZE> {
-    const PAGE_SIZE: usize = PAGE_SIZE;
-
-    fn alloc_pages(&mut self, num_pages: usize, alignment: usize) -> AllocResult<usize> {
+    pub fn alloc_pages(&mut self, num_pages: usize, alignment: usize) -> AllocResult<usize> {
         // Try to expand node pool if we are close to exhaustion
         self.maybe_expand_node_pool();
 
@@ -458,7 +432,7 @@ impl<const PAGE_SIZE: usize> PageAllocator for BuddyPageAllocator<PAGE_SIZE> {
         Err(AllocError::NoMemory)
     }
 
-    fn dealloc_pages(&mut self, pos: usize, num_pages: usize) {
+    pub fn dealloc_pages(&mut self, pos: usize, num_pages: usize) {
         self.maybe_expand_node_pool();
         if let Some(zone_idx) = self.find_zone_for_addr(pos) {
             self.zones[zone_idx].dealloc_pages(&mut self.global_node_pool, pos, num_pages);
@@ -469,7 +443,7 @@ impl<const PAGE_SIZE: usize> PageAllocator for BuddyPageAllocator<PAGE_SIZE> {
         }
     }
 
-    fn alloc_pages_at(
+    pub fn alloc_pages_at(
         &mut self,
         base: usize,
         num_pages: usize,
@@ -498,25 +472,41 @@ impl<const PAGE_SIZE: usize> PageAllocator for BuddyPageAllocator<PAGE_SIZE> {
         }
     }
 
-    fn total_pages(&self) -> usize {
+    pub fn total_pages(&self) -> usize {
         #[cfg(feature = "tracking")]
         return self.stats.total_pages;
         #[cfg(not(feature = "tracking"))]
         return 0;
     }
 
-    fn used_pages(&self) -> usize {
+    pub fn used_pages(&self) -> usize {
         #[cfg(feature = "tracking")]
         return self.stats.used_pages;
         #[cfg(not(feature = "tracking"))]
         return 0;
     }
 
-    fn available_pages(&self) -> usize {
+    pub fn available_pages(&self) -> usize {
         #[cfg(feature = "tracking")]
         return self.stats.free_pages;
         #[cfg(not(feature = "tracking"))]
         return 0;
+    }
+}
+
+impl<const PAGE_SIZE: usize> crate::slab::PageAllocatorForSlab for BuddyPageAllocator<PAGE_SIZE> {
+    fn alloc_pages(&mut self, num_pages: usize, alignment: usize) -> AllocResult<usize> {
+        Self::alloc_pages(self, num_pages, alignment)
+    }
+
+    fn dealloc_pages(&mut self, pos: usize, num_pages: usize) {
+        Self::dealloc_pages(self, pos, num_pages);
+    }
+}
+
+impl<const PAGE_SIZE: usize> Default for BuddyPageAllocator<PAGE_SIZE> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

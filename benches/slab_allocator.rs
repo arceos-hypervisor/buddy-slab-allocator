@@ -3,9 +3,7 @@
 //! This benchmark suite tests the performance and stability of the Slab allocator
 //! which is optimized for small object allocations (≤2048 bytes).
 
-use buddy_slab_allocator::{
-    BaseAllocator, ByteAllocator, CompositePageAllocator, PageAllocatorForSlab, SlabByteAllocator,
-};
+use buddy_slab_allocator::{CompositePageAllocator, PageAllocatorForSlab, SlabByteAllocator};
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use rand::{RngExt, SeedableRng};
 use std::alloc::Layout;

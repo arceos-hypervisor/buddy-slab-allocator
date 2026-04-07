@@ -7,18 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Removed the external allocator-interface dependency and restored crate-local `AllocError` / `AllocResult`
+- Stopped exporting the generic allocator traits `BaseAllocator`, `ByteAllocator`, `PageAllocator`, and `IdAllocator`
+- Public allocator APIs now favor concrete allocator methods directly instead of requiring trait imports
+
+### Removed
+- Removed the external allocator-interface crate from `[dependencies]`
+
+### Migration Notes
+- Replace imports of `BaseAllocator`, `ByteAllocator`, `PageAllocator`, and `IdAllocator` with direct method calls on `BuddyPageAllocator`, `CompositePageAllocator`, `SlabByteAllocator`, and `GlobalAllocator`
+- `PageAllocatorForSlab` remains available for wiring `SlabByteAllocator` to a page allocator
+
 ## [0.2.0] - 2026-03-05
 
 ### Added
-- Added `axallocator = "0.2"` as a dependency
+- Added an external allocator-interface dependency
 
 ### Changed
-- `AllocError`, `AllocResult`, `BaseAllocator`, `ByteAllocator`, `PageAllocator`, and `IdAllocator` are now re-exported from `axallocator` instead of being defined locally
+- `AllocError`, `AllocResult`, `BaseAllocator`, `ByteAllocator`, `PageAllocator`, and `IdAllocator` are now re-exported from the external allocator-interface crate instead of being defined locally
 - Updated Rust toolchain to `nightly-2026-02-25`
 - Benchmarks no longer require `--features bench`; `criterion` and `rand` moved to `[dev-dependencies]`
 
 ### Removed
-- Removed locally defined allocator trait and error type definitions (now provided by `axallocator`)
+- Removed locally defined allocator trait and error type definitions (now provided by the external allocator-interface crate)
 - Removed the deprecated `bench` feature flag
 
 ## [0.1.1] - 2026-02-06

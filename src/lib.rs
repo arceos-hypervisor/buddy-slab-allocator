@@ -19,7 +19,7 @@
 //! # Quick Start
 //!
 //! ```no_run
-//! use buddy_slab_allocator::{GlobalAllocator, PageAllocator};
+//! use buddy_slab_allocator::GlobalAllocator;
 //! use core::alloc::Layout;
 //!
 //! const PAGE_SIZE: usize = 0x1000;
@@ -75,9 +75,8 @@
 
 extern crate alloc;
 
-pub use axallocator::{
-    AllocError, AllocResult, BaseAllocator, ByteAllocator, IdAllocator, PageAllocator,
-};
+mod error;
+pub use error::{AllocError, AllocResult};
 
 /// Default page size for backward compatibility (4KB)
 pub const DEFAULT_PAGE_SIZE: usize = 0x1000;
