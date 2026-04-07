@@ -9,7 +9,7 @@
 - **复合页分配器**：统一的多区域页分配接口
 - **全局分配器**：协调页分配器和字节分配器，提供统一的分配接口
 - **零 `std` 依赖**：完全 `#![no_std]`，适合嵌入式和内核环境
-- **条件日志**：支持 `log` feature 启用日志，默认无依赖
+- **日志支持**：基于 `log` crate，默认可用
 - **内存追踪**：支持 `tracking` feature 收集详细统计信息
 
 ## 快速开始
@@ -21,9 +21,6 @@
 ```toml
 [dependencies]
 buddy-slab-allocator = "0.1.0"
-
-# 可选功能
-buddy-slab-allocator = { version = "0.1.0", features = ["log"] }      # 启用日志
 buddy-slab-allocator = { version = "0.1.0", features = ["tracking"] }  # 启用追踪
 ```
 
@@ -101,21 +98,17 @@ slab_alloc.dealloc(&mut page_alloc, ptr, layout);
 
 ## 特性详解
 
-### 条件日志
-
-通过 `log` feature 启用日志功能：
+### 日志
 
 ```toml
-buddy-slab-allocator = { version = "0.1.0", features = ["log"] }
+buddy-slab-allocator = "0.1.0"
 ```
 
-启用后可使用标准 `log` crate 的宏记录分配事件：
+可直接使用标准 `log` crate 的宏记录分配事件：
 
 ```rust
 log::info!("分配内存于 {:x}", addr);
 ```
-
-未启用时，日志调用会被编译为空操作，零运行时开销。
 
 ### 内存追踪
 
@@ -143,9 +136,6 @@ buddy-slab-allocator = { version = "0.1.0", features = ["tracking"] }
 ```bash
 # 运行所有测试
 cargo test --package buddy-slab-allocator
-
-# 启用日志运行测试
-cargo test --package buddy-slab-allocator --features log
 
 # 启用追踪运行测试
 cargo test --package buddy-slab-allocator --features tracking

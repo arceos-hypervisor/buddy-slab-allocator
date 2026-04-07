@@ -9,7 +9,7 @@ A high-performance page-level and byte-level memory allocator designed for embed
 - **Composite Page Allocator**: Unified multi-region page allocation interface
 - **Global Allocator**: Coordinates page and byte allocators with unified allocation interface
 - **Zero `std` Dependency**: Fully `#![no_std]`, suitable for embedded and kernel environments
-- **Conditional Logging**: Support `log` feature for logging, no dependencies by default
+- **Logging Support**: Built on the `log` crate and available by default
 - **Memory Tracking**: Support `tracking` feature for detailed statistics
 
 ## Quick Start
@@ -21,9 +21,6 @@ Add to your `Cargo.toml`:
 ```toml
 [dependencies]
 buddy-slab-allocator = "0.1.0"
-
-# Optional features
-buddy-slab-allocator = { version = "0.1.0", features = ["log"] }      # Enable logging
 buddy-slab-allocator = { version = "0.1.0", features = ["tracking"] }  # Enable tracking
 ```
 
@@ -101,21 +98,17 @@ slab_alloc.dealloc(&mut page_alloc, ptr, layout);
 
 ## Features Details
 
-### Conditional Logging
-
-Enable logging via `log` feature:
+### Logging
 
 ```toml
-buddy-slab-allocator = { version = "0.1.0", features = ["log"] }
+buddy-slab-allocator = "0.1.0"
 ```
 
-After enabling, you can use standard `log` crate macros to log allocation events:
+You can use standard `log` crate macros to log allocation events:
 
 ```rust
 log::info!("Allocated memory at {:x}", addr);
 ```
-
-When disabled, log calls are compiled to no-ops with zero runtime overhead.
 
 ### Memory Tracking
 
@@ -143,9 +136,6 @@ Run the test suite:
 ```bash
 # Run all tests
 cargo test --package buddy-slab-allocator
-
-# Run tests with logging enabled
-cargo test --package buddy-slab-allocator --features log
 
 # Run tests with tracking enabled
 cargo test --package buddy-slab-allocator --features tracking

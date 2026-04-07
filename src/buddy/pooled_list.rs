@@ -3,7 +3,6 @@
 //! Provides linked lists that draw nodes from a shared global pool,
 //! allowing efficient use of memory across all zones and orders.
 
-#[cfg(feature = "log")]
 use log::{error, warn};
 
 use super::{buddy_block::BuddyBlock, global_node_pool::GlobalNodePool};

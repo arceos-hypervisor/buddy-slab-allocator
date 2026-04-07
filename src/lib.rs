@@ -13,7 +13,7 @@
 //! - **Slab Byte Allocator**: Fast small object allocation (≤2048 bytes)
 //! - **Global Allocator**: Automatic selection between page and slab allocation based on size
 //! - **No_std Compatible**: Fully `#![no_std]` for embedded/kernel use
-//! - **Optional Logging**: Conditional compilation with `log` feature
+//! - **Logging Support**: Integrates with the `log` crate for allocation diagnostics
 //! - **Memory Tracking**: Detailed statistics with `tracking` feature
 //!
 //! # Quick Start
@@ -74,33 +74,6 @@
 #![no_std]
 
 extern crate alloc;
-
-// Logging support - conditionally import log crate
-#[cfg(feature = "log")]
-extern crate log;
-
-// Stub macros when log is disabled - these become no-ops
-#[cfg(not(feature = "log"))]
-macro_rules! error {
-    ($($arg:tt)*) => {};
-}
-#[cfg(not(feature = "log"))]
-macro_rules! warn {
-    ($($arg:tt)*) => {};
-}
-#[cfg(not(feature = "log"))]
-macro_rules! info {
-    ($($arg:tt)*) => {};
-}
-#[cfg(not(feature = "log"))]
-macro_rules! debug {
-    ($($arg:tt)*) => {};
-}
-#[cfg(not(feature = "log"))]
-#[allow(unused_macros)]
-macro_rules! trace {
-    ($($arg:tt)*) => {};
-}
 
 pub use axallocator::{
     AllocError, AllocResult, BaseAllocator, ByteAllocator, IdAllocator, PageAllocator,

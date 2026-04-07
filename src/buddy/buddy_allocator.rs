@@ -5,7 +5,6 @@
 
 use crate::{AllocError, AllocResult, BaseAllocator, PageAllocator};
 
-#[cfg(feature = "log")]
 use log::{debug, error, info, warn};
 
 #[cfg(feature = "tracking")]

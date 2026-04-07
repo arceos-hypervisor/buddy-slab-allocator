@@ -65,7 +65,6 @@ impl MemoryStatsReporter {
         request_align: usize,
     ) {
         {
-            #[cfg(feature = "log")]
             use log::error;
             error!("========================================");
             error!(

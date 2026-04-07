@@ -6,7 +6,6 @@
 use core::alloc::Layout;
 use core::ptr::NonNull;
 
-#[cfg(feature = "log")]
 use log::warn;
 
 use crate::{AllocError, AllocResult, BaseAllocator, ByteAllocator};
