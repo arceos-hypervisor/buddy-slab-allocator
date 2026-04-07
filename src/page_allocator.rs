@@ -382,19 +382,6 @@ impl<const PAGE_SIZE: usize> CompositePageAllocator<PAGE_SIZE> {
     }
 }
 
-// Implement PageAllocatorForSlab for CompositePageAllocator
-impl<const PAGE_SIZE: usize> crate::slab::PageAllocatorForSlab
-    for CompositePageAllocator<PAGE_SIZE>
-{
-    fn alloc_pages(&mut self, num_pages: usize, alignment: usize) -> AllocResult<usize> {
-        Self::alloc_pages(self, num_pages, alignment)
-    }
-
-    fn dealloc_pages(&mut self, pos: usize, num_pages: usize) {
-        Self::dealloc_pages(self, pos, num_pages)
-    }
-}
-
 impl<const PAGE_SIZE: usize> Default for CompositePageAllocator<PAGE_SIZE> {
     fn default() -> Self {
         Self::new()

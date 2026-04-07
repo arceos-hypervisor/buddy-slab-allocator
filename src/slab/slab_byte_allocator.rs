@@ -1,4 +1,4 @@
-//! Slab byte allocator implementation for Axvisor.
+//! Slab byte allocator implementation.
 //!
 //! This module implements an improved slab allocator for small object allocation
 //! with pooled linked lists, inspired by asterinas design.
@@ -10,11 +10,11 @@ use log::warn;
 
 use crate::{AllocError, AllocResult};
 
-// Re-export public types from sibling modules
+use super::slab_cache::CacheDeallocDecision;
 pub use super::slab_cache::SlabCache;
 pub use super::slab_node::SlabNode;
 
-/// Size classes for slab allocation
+/// Size classes for slab allocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
 pub enum SizeClass {
@@ -33,7 +33,6 @@ impl SizeClass {
     pub const COUNT: usize = 9;
     const MAX_OBJ_SIZE: usize = 2048;
 
-    /// Select size class from memory layout
     pub fn from_layout(layout: Layout) -> Option<Self> {
         let required_size = layout.size().max(layout.align());
 
@@ -82,37 +81,44 @@ impl SizeClass {
         }
     }
 
-    pub fn from_index(index: usize) -> Option<Self> {
-        match index {
-            0 => Some(SizeClass::Bytes8),
-            1 => Some(SizeClass::Bytes16),
-            2 => Some(SizeClass::Bytes32),
-            3 => Some(SizeClass::Bytes64),
-            4 => Some(SizeClass::Bytes128),
-            5 => Some(SizeClass::Bytes256),
-            6 => Some(SizeClass::Bytes512),
-            7 => Some(SizeClass::Bytes1024),
-            8 => Some(SizeClass::Bytes2048),
-            _ => None,
-        }
+    pub fn page_count(&self, page_size: usize) -> usize {
+        SlabNode::new(0, *self).page_count(page_size)
+    }
+
+    pub fn slab_bytes(&self, page_size: usize) -> usize {
+        self.page_count(page_size) * page_size
     }
 }
 
-/// Page allocator trait for slab allocator
-pub trait PageAllocatorForSlab {
-    fn alloc_pages(&mut self, num_pages: usize, alignment: usize) -> AllocResult<usize>;
-    fn dealloc_pages(&mut self, pos: usize, num_pages: usize);
+pub enum SlabAllocDecision {
+    Allocated(NonNull<u8>, usize),
+    NeedsRefill {
+        size_class: SizeClass,
+        page_count: usize,
+        slab_bytes: usize,
+    },
 }
 
-/// Slab byte allocator with pooled linked lists
+pub enum SlabDeallocDecision {
+    Done {
+        bytes_released: usize,
+        actually_deallocated: bool,
+    },
+    ReleaseSlab {
+        slab_base: usize,
+        page_count: usize,
+        slab_bytes: usize,
+        actually_deallocated: bool,
+    },
+}
+
+/// Slab byte allocator with pooled linked lists.
 pub struct SlabByteAllocator<const PAGE_SIZE: usize = { crate::DEFAULT_PAGE_SIZE }> {
     caches: [SlabCache; SizeClass::COUNT],
-    page_allocator: Option<*mut dyn PageAllocatorForSlab>,
     total_bytes: usize,
     allocated_bytes: usize,
 }
 
-// SAFETY: SlabByteAllocator is used behind SpinNoIrq locks
 unsafe impl<const PAGE_SIZE: usize> Send for SlabByteAllocator<PAGE_SIZE> {}
 unsafe impl<const PAGE_SIZE: usize> Sync for SlabByteAllocator<PAGE_SIZE> {}
 
@@ -130,57 +136,105 @@ impl<const PAGE_SIZE: usize> SlabByteAllocator<PAGE_SIZE> {
                 SlabCache::new(SizeClass::Bytes1024),
                 SlabCache::new(SizeClass::Bytes2048),
             ],
-            page_allocator: None,
             total_bytes: 0,
             allocated_bytes: 0,
         }
     }
 
-    /// Initialize the allocator
-    pub fn init(&mut self) {}
-
-    pub fn set_page_allocator(&mut self, page_allocator: *mut dyn PageAllocatorForSlab) {
-        self.page_allocator = Some(page_allocator);
-    }
-
-    pub fn alloc(&mut self, layout: Layout) -> AllocResult<NonNull<u8>> {
+    pub fn alloc(&mut self, layout: Layout) -> AllocResult<SlabAllocDecision> {
         let size_class = SizeClass::from_layout(layout).ok_or(AllocError::InvalidParam)?;
-
-        let Some(page_allocator_ptr) = self.page_allocator else {
-            return Err(AllocError::NoMemory);
-        };
-
-        let page_allocator = unsafe { &mut *page_allocator_ptr };
         let cache = &mut self.caches[size_class.to_index()];
 
-        let (obj_addr, page_bytes) = cache.alloc_object(page_allocator, PAGE_SIZE)?;
-        self.allocated_bytes += layout.size().max(layout.align());
-        self.total_bytes += page_bytes;
+        if let Some(obj_addr) = cache.alloc_object()? {
+            self.allocated_bytes += layout.size().max(layout.align());
+            return Ok(SlabAllocDecision::Allocated(
+                unsafe { NonNull::new_unchecked(obj_addr as *mut u8) },
+                0,
+            ));
+        }
 
-        Ok(unsafe { NonNull::new_unchecked(obj_addr as *mut u8) })
+        Ok(SlabAllocDecision::NeedsRefill {
+            size_class,
+            page_count: size_class.page_count(PAGE_SIZE),
+            slab_bytes: size_class.slab_bytes(PAGE_SIZE),
+        })
     }
 
-    pub fn dealloc(&mut self, ptr: NonNull<u8>, layout: Layout) {
-        let size_class = SizeClass::from_layout(layout).expect("Invalid layout");
-        let obj_addr = ptr.as_ptr() as usize;
+    pub fn provide_slab(
+        &mut self,
+        size_class: SizeClass,
+        owner_cpu: usize,
+        slab_base: usize,
+        slab_bytes: usize,
+    ) -> AllocResult<()> {
+        self.caches[size_class.to_index()].provide_slab(slab_base, slab_bytes, owner_cpu)?;
+        self.total_bytes += slab_bytes;
+        Ok(())
+    }
 
-        let Some(page_allocator_ptr) = self.page_allocator else {
-            return;
+    pub fn dealloc(&mut self, ptr: NonNull<u8>, layout: Layout) -> SlabDeallocDecision {
+        let Some(size_class) = SizeClass::from_layout(layout) else {
+            warn!(
+                "Invalid layout during slab dealloc: size={}, align={}",
+                layout.size(),
+                layout.align()
+            );
+            return SlabDeallocDecision::Done {
+                bytes_released: 0,
+                actually_deallocated: false,
+            };
         };
 
-        let page_allocator = unsafe { &mut *page_allocator_ptr };
-        let cache = &mut self.caches[size_class.to_index()];
+        let decision =
+            self.caches[size_class.to_index()].dealloc_object(ptr.as_ptr() as usize, PAGE_SIZE);
 
-        let (freed_bytes, actually_freed) =
-            cache.dealloc_object(obj_addr, page_allocator, PAGE_SIZE);
-
-        // Only update allocated_bytes if this was not a double-free
-        if actually_freed {
-            self.allocated_bytes = self
-                .allocated_bytes
-                .saturating_sub(layout.size().max(layout.align()));
+        match decision {
+            CacheDeallocDecision::Done {
+                bytes_released,
+                actually_deallocated,
+            } => {
+                if actually_deallocated {
+                    self.allocated_bytes = self
+                        .allocated_bytes
+                        .saturating_sub(layout.size().max(layout.align()));
+                }
+                SlabDeallocDecision::Done {
+                    bytes_released,
+                    actually_deallocated,
+                }
+            }
+            CacheDeallocDecision::ReleaseSlab {
+                slab_base,
+                page_count,
+                slab_bytes,
+                actually_deallocated,
+            } => {
+                if actually_deallocated {
+                    self.allocated_bytes = self
+                        .allocated_bytes
+                        .saturating_sub(layout.size().max(layout.align()));
+                }
+                self.total_bytes = self.total_bytes.saturating_sub(slab_bytes);
+                SlabDeallocDecision::ReleaseSlab {
+                    slab_base,
+                    page_count,
+                    slab_bytes,
+                    actually_deallocated,
+                }
+            }
         }
-        self.total_bytes = self.total_bytes.saturating_sub(freed_bytes);
+    }
+
+    pub fn owner_cpu_of(&self, ptr: NonNull<u8>, layout: Layout) -> Option<usize> {
+        let size_class = SizeClass::from_layout(layout)?;
+        let slab_bytes = size_class.slab_bytes(PAGE_SIZE);
+        let slab_base = (ptr.as_ptr() as usize / slab_bytes) * slab_bytes;
+        let node = SlabNode::new(slab_base, size_class);
+        if node.is_valid_for_size_class() {
+            Some(node.owner_cpu())
+        } else {
+            None
+        }
     }
 
     pub fn total_bytes(&self) -> usize {
@@ -228,7 +282,6 @@ mod tests {
 
     #[test]
     fn test_size_class_boundaries() {
-        // Test all size class boundaries
         assert_eq!(SizeClass::Bytes8.size(), 8);
         assert_eq!(SizeClass::Bytes16.size(), 16);
         assert_eq!(SizeClass::Bytes32.size(), 32);
@@ -242,7 +295,6 @@ mod tests {
 
     #[test]
     fn test_size_class_alignment_limits() {
-        // Alignment too large should return None
         assert_eq!(
             SizeClass::from_layout(Layout::from_size_align(64, 4096).unwrap()),
             None

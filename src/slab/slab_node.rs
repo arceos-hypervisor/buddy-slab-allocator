@@ -14,6 +14,7 @@ pub(crate) struct SlabHeader {
     object_count: u16,
     free_count: u16,
     _reserved: u16,
+    owner_cpu: u32,
     slab_bytes: usize,
     prev: usize,
     next: usize,
@@ -52,7 +53,7 @@ impl SlabNode {
         unsafe { &mut *(self.addr as *mut SlabHeader) }
     }
 
-    pub fn init_header(&mut self, slab_bytes: usize) {
+    pub fn init_header(&mut self, slab_bytes: usize, owner_cpu: usize) {
         let object_size = self.size_class.size();
         let header_size_aligned = self.header_size_aligned();
         let object_count = if slab_bytes > header_size_aligned {
@@ -94,6 +95,7 @@ impl SlabNode {
             object_count: object_count as u16,
             free_count: object_count as u16,
             _reserved: 0,
+            owner_cpu: owner_cpu as u32,
             slab_bytes,
             prev: 0,
             next: 0,
@@ -198,6 +200,10 @@ impl SlabNode {
         bytes_needed.div_ceil(page_size)
     }
 
+    pub fn owner_cpu(&self) -> usize {
+        self.header().owner_cpu as usize
+    }
+
     pub fn prev(&self) -> Option<usize> {
         let prev = self.header().prev;
         if prev == 0 {
@@ -240,7 +246,7 @@ mod tests {
         let base = unsafe { alloc(layout) } as usize;
         assert_ne!(base, 0);
         node.addr = base;
-        node.init_header(slab_bytes);
+        node.init_header(slab_bytes, 0);
 
         assert!(node.is_empty());
         assert!(!node.is_full());
@@ -274,7 +280,7 @@ mod tests {
         let base = unsafe { alloc(layout) } as usize;
         assert_ne!(base, 0);
         node.addr = base;
-        node.init_header(slab_bytes);
+        node.init_header(slab_bytes, 0);
 
         let obj0 = node.object_addr(0);
         assert_eq!(node.object_index_from_addr(obj0), Some(0));

@@ -8,4 +8,6 @@ pub mod slab_cache;
 pub mod slab_node;
 
 // Re-export public types
-pub use slab_byte_allocator::{PageAllocatorForSlab, SizeClass, SlabByteAllocator};
+pub use slab_byte_allocator::{
+    SizeClass, SlabAllocDecision, SlabByteAllocator, SlabDeallocDecision,
+};

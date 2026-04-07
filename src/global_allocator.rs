@@ -1,27 +1,31 @@
 //! Global allocator implementation.
 //!
-//! This module implements a global allocator that coordinates between
-//! buddy page allocator and slab byte allocator for optimal performance.
+//! This module implements a multi-core global allocator that coordinates
+//! between a shared page allocator backend and per-CPU slab frontends.
 
 extern crate alloc;
 
+use crate::os::set_os_provider;
+use crate::slab::slab_node::SlabNode;
+use crate::slab::{SizeClass, SlabAllocDecision, SlabByteAllocator, SlabDeallocDecision};
 use crate::{AllocError, AllocResult};
 use core::alloc::Layout;
+use core::mem::{align_of, size_of};
 use core::ptr::NonNull;
+use core::slice;
 #[cfg(feature = "tracking")]
 use core::sync::atomic::AtomicUsize;
 use core::sync::atomic::{AtomicBool, Ordering};
+use log::error;
+use spin::Mutex;
 
 #[cfg(feature = "tracking")]
 use super::buddy::BuddyStats;
 use super::page_allocator::CompositePageAllocator;
-use super::slab::{PageAllocatorForSlab, SlabByteAllocator};
 
-use log::error;
+const MIN_HEAP_SIZE: usize = 0x8000;
 
-const MIN_HEAP_SIZE: usize = 0x8000; // 32KB minimum heap
-
-/// Memory usage statistics
+/// Memory usage statistics.
 #[cfg(feature = "tracking")]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct UsageStats {
@@ -32,7 +36,6 @@ pub struct UsageStats {
     pub heap_bytes: usize,
 }
 
-/// Internal atomic representation of usage statistics
 #[cfg(feature = "tracking")]
 struct UsageStatsAtomic {
     total_pages: AtomicUsize,
@@ -78,10 +81,31 @@ fn saturating_sub_atomic(counter: &AtomicUsize, value: usize) {
     }
 }
 
-/// Global allocator that coordinates composite and slab allocators
+#[derive(Clone, Copy, Default)]
+struct MetadataRegionInfo {
+    start: usize,
+    size: usize,
+}
+
+struct PerCpuSlabSlot<const PAGE_SIZE: usize> {
+    slab: Mutex<SlabByteAllocator<PAGE_SIZE>>,
+}
+
+impl<const PAGE_SIZE: usize> PerCpuSlabSlot<PAGE_SIZE> {
+    const fn new() -> Self {
+        Self {
+            slab: Mutex::new(SlabByteAllocator::new()),
+        }
+    }
+}
+
+/// Multi-core global allocator facade.
 pub struct GlobalAllocator<const PAGE_SIZE: usize = { crate::DEFAULT_PAGE_SIZE }> {
-    page_allocator: CompositePageAllocator<PAGE_SIZE>,
-    slab_allocator: SlabByteAllocator<PAGE_SIZE>,
+    buddy: Mutex<CompositePageAllocator<PAGE_SIZE>>,
+    slab_slots_ptr: Option<NonNull<PerCpuSlabSlot<PAGE_SIZE>>>,
+    cpu_count: usize,
+    metadata_region: MetadataRegionInfo,
+    os: &'static dyn crate::Os,
     #[cfg(feature = "tracking")]
     stats: UsageStatsAtomic,
     initialized: AtomicBool,
@@ -90,202 +114,79 @@ pub struct GlobalAllocator<const PAGE_SIZE: usize = { crate::DEFAULT_PAGE_SIZE }
 impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
     pub const fn new() -> Self {
         Self {
-            page_allocator: CompositePageAllocator::<PAGE_SIZE>::new(),
-            slab_allocator: SlabByteAllocator::<PAGE_SIZE>::new(),
+            buddy: Mutex::new(CompositePageAllocator::<PAGE_SIZE>::new()),
+            slab_slots_ptr: None,
+            cpu_count: 0,
+            metadata_region: MetadataRegionInfo { start: 0, size: 0 },
+            os: &crate::NoImplOs,
             #[cfg(feature = "tracking")]
             stats: UsageStatsAtomic::new(),
             initialized: AtomicBool::new(false),
         }
     }
 
+    pub fn required_metadata_size(cpu_count: usize) -> usize {
+        if cpu_count == 0 {
+            return 0;
+        }
+        let slot_size = size_of::<PerCpuSlabSlot<PAGE_SIZE>>();
+        let slot_align = align_of::<PerCpuSlabSlot<PAGE_SIZE>>();
+        let size = slot_size.saturating_mul(cpu_count);
+        crate::align_up(size, slot_align)
+    }
+
+    pub fn required_metadata_align() -> usize {
+        align_of::<PerCpuSlabSlot<PAGE_SIZE>>()
+    }
+
     /// Set the address translator so that the underlying page allocator can
     /// reason about physical address ranges (e.g. low-memory regions below 4GiB).
-    pub fn set_addr_translator(&mut self, translator: &'static dyn crate::AddrTranslator) {
-        self.page_allocator.set_addr_translator(translator);
+    pub fn set_addr_translator(&self, translator: &'static dyn crate::AddrTranslator) {
+        self.buddy.lock().set_addr_translator(translator);
     }
 
-    /// Allocate low-memory pages (physical address < 4GiB).
-    /// This is a thin wrapper over the composite allocator's lowmem API.
-    pub fn alloc_dma32_pages(&mut self, num_pages: usize, alignment: usize) -> AllocResult<usize> {
+    fn slab_slots(&self) -> &[PerCpuSlabSlot<PAGE_SIZE>] {
+        let ptr = self
+            .slab_slots_ptr
+            .expect("global allocator slab slots accessed before init");
+        unsafe { slice::from_raw_parts(ptr.as_ptr(), self.cpu_count) }
+    }
+
+    fn slab_slot(&self, cpu_id: usize) -> AllocResult<&PerCpuSlabSlot<PAGE_SIZE>> {
         if !self.initialized.load(Ordering::SeqCst) {
-            error!("global allocator: Allocator not initialized");
             return Err(AllocError::NoMemory);
         }
-
-        let addr = self
-            .page_allocator
-            .alloc_pages_lowmem(num_pages, alignment)?;
-
-        // Update statistics
-        #[cfg(feature = "tracking")]
-        {
-            self.stats
-                .used_pages
-                .fetch_add(num_pages, Ordering::Relaxed);
-            self.stats
-                .free_pages
-                .fetch_sub(num_pages, Ordering::Relaxed);
-        }
-
-        Ok(addr)
-    }
-
-    /// Initialize allocator with given memory region
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use buddy_slab_allocator::GlobalAllocator;
-    ///
-    /// const PAGE_SIZE: usize = 0x1000;
-    /// let mut allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    /// allocator.init(0x8000_0000, 16 * 1024 * 1024).unwrap();
-    /// ```
-    pub fn init(&mut self, start_vaddr: usize, size: usize) -> AllocResult<()> {
-        if size <= MIN_HEAP_SIZE {
+        if cpu_id >= self.cpu_count {
             return Err(AllocError::InvalidParam);
         }
-
-        self.page_allocator.init(start_vaddr, size);
-
-        self.slab_allocator.init();
-
-        {
-            let page_alloc_ptr = &mut self.page_allocator as *mut CompositePageAllocator<PAGE_SIZE>;
-            self.slab_allocator
-                .set_page_allocator(page_alloc_ptr as *mut dyn PageAllocatorForSlab);
-        }
-
-        // Update statistics
-        #[cfg(feature = "tracking")]
-        {
-            self.stats
-                .total_pages
-                .store(self.page_allocator.total_pages(), Ordering::Relaxed);
-            self.stats
-                .used_pages
-                .store(self.page_allocator.used_pages(), Ordering::Relaxed);
-            self.stats
-                .free_pages
-                .store(self.page_allocator.available_pages(), Ordering::Relaxed);
-        }
-
-        self.initialized.store(true, Ordering::SeqCst);
-        Ok(())
+        Ok(&self.slab_slots()[cpu_id])
     }
 
-    /// Dynamically add memory region to allocator
-    pub fn add_memory(&mut self, start_vaddr: usize, size: usize) -> AllocResult<()> {
-        self.page_allocator.add_memory(start_vaddr, size)?;
-
-        // Update statistics
-        #[cfg(feature = "tracking")]
-        {
-            self.stats
-                .total_pages
-                .store(self.page_allocator.total_pages(), Ordering::Relaxed);
-            self.stats
-                .free_pages
-                .store(self.page_allocator.available_pages(), Ordering::Relaxed);
+    fn current_cpu_idx_checked(&self) -> AllocResult<usize> {
+        let cpu_id = self.os.current_cpu_idx();
+        if cpu_id >= self.cpu_count {
+            error!(
+                "global allocator: OS reported cpu_id {} >= cpu_count {}",
+                cpu_id, self.cpu_count
+            );
+            return Err(AllocError::InvalidParam);
         }
-
-        Ok(())
+        Ok(cpu_id)
     }
 
-    /// Smart allocation based on size
-    ///
-    /// Small allocations (≤2048 bytes) use slab allocator,
-    /// larger allocations use page allocator.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use buddy_slab_allocator::GlobalAllocator;
-    /// use core::alloc::Layout;
-    ///
-    /// const PAGE_SIZE: usize = 0x1000;
-    /// let mut allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    /// allocator.init(0x8000_0000, 16 * 1024 * 1024).unwrap();
-    ///
-    /// let layout = Layout::from_size_align(64, 8).unwrap();
-    /// let ptr = allocator.alloc(layout).unwrap();
-    /// allocator.dealloc(ptr, layout);
-    /// ```
-    pub fn alloc(&mut self, layout: Layout) -> AllocResult<NonNull<u8>> {
-        if !self.initialized.load(Ordering::SeqCst) {
-            error!("global allocator: Allocator not initialized");
-            return Err(AllocError::NoMemory);
+    fn owner_cpu_from_ptr(&self, ptr: NonNull<u8>, layout: Layout) -> Option<usize> {
+        let size_class = SizeClass::from_layout(layout)?;
+        let slab_bytes = size_class.slab_bytes(PAGE_SIZE);
+        let slab_base = (ptr.as_ptr() as usize / slab_bytes) * slab_bytes;
+        let node = SlabNode::new(slab_base, size_class);
+        if node.is_valid_for_size_class() {
+            Some(node.owner_cpu())
+        } else {
+            None
         }
-
-        if layout.size() <= 2048 && layout.align() <= 2048 {
-            // Try slab allocator first
-            match self.slab_allocator.alloc(layout) {
-                Ok(ptr) => {
-                    #[cfg(feature = "tracking")]
-                    {
-                        self.stats
-                            .slab_bytes
-                            .fetch_add(layout.size(), Ordering::Relaxed);
-                    }
-                    return Ok(ptr);
-                }
-                Err(e) => {
-                    // Slab allocator should handle all requests that satisfy constraints
-                    // If it fails, it's a real error (e.g., out of memory)
-                    // Log for debugging
-                    error!(
-                        "global allocator: Slab allocator failed for layout {layout:?}, error: {e:?}, falling back to page allocator"
-                    );
-                    return Err(e);
-                }
-            }
-        }
-
-        let pages_needed = layout.size().div_ceil(PAGE_SIZE);
-
-        let addr = self
-            .page_allocator
-            .alloc_pages(pages_needed, layout.align())?;
-        let ptr = unsafe { NonNull::new_unchecked(addr as *mut u8) };
-
-        #[cfg(feature = "tracking")]
-        {
-            self.stats
-                .used_pages
-                .fetch_add(pages_needed, Ordering::Relaxed);
-            self.stats
-                .free_pages
-                .fetch_sub(pages_needed, Ordering::Relaxed);
-            self.stats
-                .heap_bytes
-                .fetch_add(layout.size(), Ordering::Relaxed);
-        }
-
-        Ok(ptr)
     }
 
-    /// Allocate pages
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use buddy_slab_allocator::GlobalAllocator;
-    ///
-    /// const PAGE_SIZE: usize = 0x1000;
-    /// let mut allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    /// allocator.init(0x8000_0000, 16 * 1024 * 1024).unwrap();
-    ///
-    /// let addr = allocator.alloc_pages(4, PAGE_SIZE).unwrap();
-    /// allocator.dealloc_pages(addr, 4);
-    /// ```
-    pub fn alloc_pages(&mut self, num_pages: usize, alignment: usize) -> AllocResult<usize> {
-        if !self.initialized.load(Ordering::SeqCst) {
-            return Err(AllocError::NoMemory);
-        }
-
-        let addr = self.page_allocator.alloc_pages(num_pages, alignment)?;
-
-        // Update statistics
+    fn update_page_stats_after_alloc(&self, num_pages: usize) {
         #[cfg(feature = "tracking")]
         {
             self.stats
@@ -295,51 +196,11 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
                 .free_pages
                 .fetch_sub(num_pages, Ordering::Relaxed);
         }
-
-        Ok(addr)
+        #[cfg(not(feature = "tracking"))]
+        let _ = num_pages;
     }
 
-    /// Deallocate memory
-    pub fn dealloc(&mut self, ptr: NonNull<u8>, layout: Layout) {
-        if !self.initialized.load(Ordering::SeqCst) {
-            error!("global allocator: Deallocating memory before initializing");
-            return;
-        }
-
-        if layout.size() <= 2048 && layout.align() <= 2048 {
-            // This memory must have been allocated by slab allocator
-            // If dealloc fails (not found in slab), it's a critical error
-            self.slab_allocator.dealloc(ptr, layout);
-            #[cfg(feature = "tracking")]
-            {
-                saturating_sub_atomic(&self.stats.slab_bytes, layout.size());
-            }
-            return;
-        }
-
-        // This memory was allocated by page allocator
-        let pages_needed = layout.size().div_ceil(PAGE_SIZE);
-        self.page_allocator
-            .dealloc_pages(ptr.as_ptr() as usize, pages_needed);
-        #[cfg(feature = "tracking")]
-        {
-            saturating_sub_atomic(&self.stats.used_pages, pages_needed);
-            self.stats
-                .free_pages
-                .fetch_add(pages_needed, Ordering::Relaxed);
-            saturating_sub_atomic(&self.stats.heap_bytes, layout.size());
-        }
-    }
-
-    /// Deallocate pages
-    pub fn dealloc_pages(&mut self, pos: usize, num_pages: usize) {
-        if !self.initialized.load(Ordering::SeqCst) {
-            return;
-        }
-
-        self.page_allocator.dealloc_pages(pos, num_pages);
-
-        // Update statistics
+    fn update_page_stats_after_free(&self, num_pages: usize) {
         #[cfg(feature = "tracking")]
         {
             saturating_sub_atomic(&self.stats.used_pages, num_pages);
@@ -347,11 +208,252 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
                 .free_pages
                 .fetch_add(num_pages, Ordering::Relaxed);
         }
+        #[cfg(not(feature = "tracking"))]
+        let _ = num_pages;
     }
 
-    /// Reallocate memory
+    /// Initialize the allocator with metadata storage, memory region, CPU topology and OS hooks.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `[meta_start, meta_start + meta_size)` is valid writable memory
+    /// for the lifetime of the allocator and is not used for any other purpose.
+    pub unsafe fn init(
+        &mut self,
+        meta_start: usize,
+        meta_size: usize,
+        heap_start: usize,
+        heap_size: usize,
+        cpu_count: usize,
+        os: &'static dyn crate::Os,
+    ) -> AllocResult<()> {
+        if self.initialized.load(Ordering::SeqCst) {
+            return Err(AllocError::InvalidParam);
+        }
+        if cpu_count == 0 || heap_size <= MIN_HEAP_SIZE {
+            return Err(AllocError::InvalidParam);
+        }
+        if !meta_start.is_multiple_of(Self::required_metadata_align()) {
+            return Err(AllocError::InvalidParam);
+        }
+        if meta_size < Self::required_metadata_size(cpu_count) {
+            return Err(AllocError::NoMemory);
+        }
+
+        let slots_ptr = meta_start as *mut PerCpuSlabSlot<PAGE_SIZE>;
+        for idx in 0..cpu_count {
+            slots_ptr.add(idx).write(PerCpuSlabSlot::new());
+        }
+
+        self.slab_slots_ptr = Some(NonNull::new(slots_ptr).ok_or(AllocError::InvalidParam)?);
+        self.cpu_count = cpu_count;
+        self.metadata_region = MetadataRegionInfo {
+            start: meta_start,
+            size: meta_size,
+        };
+        self.os = os;
+
+        self.buddy.get_mut().init(heap_start, heap_size);
+
+        #[cfg(feature = "tracking")]
+        {
+            let buddy = self.buddy.get_mut();
+            self.stats
+                .total_pages
+                .store(buddy.total_pages(), Ordering::Relaxed);
+            self.stats
+                .used_pages
+                .store(buddy.used_pages(), Ordering::Relaxed);
+            self.stats
+                .free_pages
+                .store(buddy.available_pages(), Ordering::Relaxed);
+        }
+
+        set_os_provider(os);
+        self.initialized.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    pub fn add_memory(&self, start_vaddr: usize, size: usize) -> AllocResult<()> {
+        if !self.initialized.load(Ordering::SeqCst) {
+            return Err(AllocError::NoMemory);
+        }
+
+        let mut buddy = self.buddy.lock();
+        buddy.add_memory(start_vaddr, size)?;
+
+        #[cfg(feature = "tracking")]
+        {
+            self.stats
+                .total_pages
+                .store(buddy.total_pages(), Ordering::Relaxed);
+            self.stats
+                .free_pages
+                .store(buddy.available_pages(), Ordering::Relaxed);
+        }
+
+        Ok(())
+    }
+
+    pub fn alloc_dma32_pages(&self, num_pages: usize, alignment: usize) -> AllocResult<usize> {
+        if !self.initialized.load(Ordering::SeqCst) {
+            error!("global allocator: Allocator not initialized");
+            return Err(AllocError::NoMemory);
+        }
+
+        let mut buddy = self.buddy.lock();
+        let addr = buddy.alloc_pages_lowmem(num_pages, alignment)?;
+        self.update_page_stats_after_alloc(num_pages);
+        Ok(addr)
+    }
+
+    pub fn alloc(&self, layout: Layout) -> AllocResult<NonNull<u8>> {
+        if !self.initialized.load(Ordering::SeqCst) {
+            error!("global allocator: Allocator not initialized");
+            return Err(AllocError::NoMemory);
+        }
+
+        if layout.size() <= 2048 && layout.align() <= 2048 {
+            let cpu_id = self.current_cpu_idx_checked()?;
+
+            loop {
+                let decision = {
+                    let slot = self.slab_slot(cpu_id)?;
+                    let mut slab = slot.slab.lock();
+                    slab.alloc(layout)?
+                };
+
+                match decision {
+                    SlabAllocDecision::Allocated(ptr, _) => {
+                        #[cfg(feature = "tracking")]
+                        {
+                            self.stats
+                                .slab_bytes
+                                .fetch_add(layout.size(), Ordering::Relaxed);
+                        }
+                        return Ok(ptr);
+                    }
+                    SlabAllocDecision::NeedsRefill {
+                        size_class,
+                        page_count,
+                        slab_bytes,
+                    } => {
+                        let slab_base = {
+                            let mut buddy = self.buddy.lock();
+                            let addr = buddy.alloc_pages(page_count, slab_bytes)?;
+                            self.update_page_stats_after_alloc(page_count);
+                            addr
+                        };
+
+                        let slot = self.slab_slot(cpu_id)?;
+                        let mut slab = slot.slab.lock();
+                        slab.provide_slab(size_class, cpu_id, slab_base, slab_bytes)?;
+                    }
+                }
+            }
+        }
+
+        let pages_needed = layout.size().div_ceil(PAGE_SIZE);
+        let addr = {
+            let mut buddy = self.buddy.lock();
+            buddy.alloc_pages(pages_needed, layout.align())?
+        };
+        self.update_page_stats_after_alloc(pages_needed);
+        #[cfg(feature = "tracking")]
+        {
+            self.stats
+                .heap_bytes
+                .fetch_add(layout.size(), Ordering::Relaxed);
+        }
+        Ok(unsafe { NonNull::new_unchecked(addr as *mut u8) })
+    }
+
+    pub fn alloc_pages(&self, num_pages: usize, alignment: usize) -> AllocResult<usize> {
+        if !self.initialized.load(Ordering::SeqCst) {
+            return Err(AllocError::NoMemory);
+        }
+
+        let addr = {
+            let mut buddy = self.buddy.lock();
+            buddy.alloc_pages(num_pages, alignment)?
+        };
+        self.update_page_stats_after_alloc(num_pages);
+        Ok(addr)
+    }
+
+    pub fn dealloc(&self, ptr: NonNull<u8>, layout: Layout) {
+        if !self.initialized.load(Ordering::SeqCst) {
+            error!("global allocator: Deallocating memory before initializing");
+            return;
+        }
+
+        if layout.size() <= 2048 && layout.align() <= 2048 {
+            let owner_cpu = self
+                .owner_cpu_from_ptr(ptr, layout)
+                .unwrap_or_else(|| self.os.current_cpu_idx());
+            if let Ok(slot) = self.slab_slot(owner_cpu) {
+                let decision = {
+                    let mut slab = slot.slab.lock();
+                    let decision = slab.dealloc(ptr, layout);
+                    #[cfg(feature = "tracking")]
+                    {
+                        let actually_deallocated = match &decision {
+                            SlabDeallocDecision::Done {
+                                actually_deallocated,
+                                ..
+                            }
+                            | SlabDeallocDecision::ReleaseSlab {
+                                actually_deallocated,
+                                ..
+                            } => *actually_deallocated,
+                        };
+                        if actually_deallocated {
+                            saturating_sub_atomic(&self.stats.slab_bytes, layout.size());
+                        }
+                    }
+                    decision
+                };
+
+                if let SlabDeallocDecision::ReleaseSlab {
+                    slab_base,
+                    page_count,
+                    ..
+                } = decision
+                {
+                    let mut buddy = self.buddy.lock();
+                    buddy.dealloc_pages(slab_base, page_count);
+                    self.update_page_stats_after_free(page_count);
+                }
+            }
+            return;
+        }
+
+        let pages_needed = layout.size().div_ceil(PAGE_SIZE);
+        {
+            let mut buddy = self.buddy.lock();
+            buddy.dealloc_pages(ptr.as_ptr() as usize, pages_needed);
+        }
+        self.update_page_stats_after_free(pages_needed);
+        #[cfg(feature = "tracking")]
+        {
+            saturating_sub_atomic(&self.stats.heap_bytes, layout.size());
+        }
+    }
+
+    pub fn dealloc_pages(&self, pos: usize, num_pages: usize) {
+        if !self.initialized.load(Ordering::SeqCst) {
+            return;
+        }
+
+        {
+            let mut buddy = self.buddy.lock();
+            buddy.dealloc_pages(pos, num_pages);
+        }
+        self.update_page_stats_after_free(num_pages);
+    }
+
     #[allow(clippy::not_unsafe_ptr_arg_deref)]
-    pub fn realloc(&mut self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+    pub fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         if new_size == 0 {
             if let Some(ptr) = NonNull::new(ptr) {
                 self.dealloc(ptr, layout);
@@ -368,15 +470,12 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
             };
         }
 
-        let new_layout = Layout::from_size_align(new_size, layout.align())
-            .unwrap_or_else(|_| Layout::new::<u8>());
-
-        // If new size fits in old allocation, return old pointer
         if new_size <= layout.size() {
             return ptr;
         }
 
-        // Allocate new memory and copy
+        let new_layout = Layout::from_size_align(new_size, layout.align())
+            .unwrap_or_else(|_| Layout::new::<u8>());
         match self.alloc(new_layout) {
             Ok(new_ptr) => {
                 let new_ptr = new_ptr.as_ptr();
@@ -395,31 +494,56 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
             Err(_) => core::ptr::null_mut(),
         }
     }
-}
 
-impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
     pub fn total_pages(&self) -> usize {
-        self.page_allocator.total_pages()
+        #[cfg(feature = "tracking")]
+        {
+            return self.stats.total_pages.load(Ordering::Relaxed);
+        }
+        #[cfg(not(feature = "tracking"))]
+        {
+            self.buddy.lock().total_pages()
+        }
     }
 
     pub fn used_pages(&self) -> usize {
-        self.page_allocator.used_pages()
+        #[cfg(feature = "tracking")]
+        {
+            return self.stats.used_pages.load(Ordering::Relaxed);
+        }
+        #[cfg(not(feature = "tracking"))]
+        {
+            self.buddy.lock().used_pages()
+        }
     }
 
     pub fn available_pages(&self) -> usize {
-        self.page_allocator.available_pages()
+        #[cfg(feature = "tracking")]
+        {
+            return self.stats.free_pages.load(Ordering::Relaxed);
+        }
+        #[cfg(not(feature = "tracking"))]
+        {
+            self.buddy.lock().available_pages()
+        }
     }
 
-    /// Get memory statistics
+    pub fn cpu_count(&self) -> usize {
+        self.cpu_count
+    }
+
+    pub fn metadata_region(&self) -> (usize, usize) {
+        (self.metadata_region.start, self.metadata_region.size)
+    }
+
     #[cfg(feature = "tracking")]
     pub fn get_stats(&self) -> UsageStats {
         self.stats.snapshot()
     }
 
-    /// Get buddy allocator statistics
     #[cfg(feature = "tracking")]
     pub fn get_buddy_stats(&self) -> BuddyStats {
-        self.page_allocator.get_buddy_stats()
+        self.buddy.lock().get_buddy_stats()
     }
 }
 

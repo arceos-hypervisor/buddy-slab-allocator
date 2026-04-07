@@ -24,11 +24,18 @@
 //!
 //! const PAGE_SIZE: usize = 0x1000;
 //! let mut allocator = GlobalAllocator::<PAGE_SIZE>::new();
+//! struct DemoOs;
+//! impl buddy_slab_allocator::Os for DemoOs {
+//!     fn current_cpu_idx(&self) -> usize { 0 }
+//! }
+//! static OS: DemoOs = DemoOs;
 //!
 //! // Initialize with memory region
 //! let heap_start = 0x8000_0000;
 //! let heap_size = 16 * 1024 * 1024; // 16MB
-//! allocator.init(heap_start, heap_size).unwrap();
+//! let meta_start = 0x8100_0000;
+//! let meta_size = GlobalAllocator::<PAGE_SIZE>::required_metadata_size(1);
+//! unsafe { allocator.init(meta_start, meta_size, heap_start, heap_size, 1, &OS).unwrap(); }
 //!
 //! // Allocate pages
 //! let addr = allocator.alloc_pages(4, PAGE_SIZE).unwrap();
@@ -44,7 +51,18 @@
 //!
 //! const PAGE_SIZE: usize = 0x1000;
 //! let mut allocator = GlobalAllocator::<PAGE_SIZE>::new();
-//! allocator.init(0x8000_0000, 16 * 1024 * 1024).unwrap();
+//! struct DemoOs;
+//! impl buddy_slab_allocator::Os for DemoOs {
+//!     fn current_cpu_idx(&self) -> usize { 0 }
+//! }
+//! static OS: DemoOs = DemoOs;
+//! let meta_start = 0x8100_0000;
+//! let meta_size = GlobalAllocator::<PAGE_SIZE>::required_metadata_size(1);
+//! unsafe {
+//!     allocator
+//!         .init(meta_start, meta_size, 0x8000_0000, 16 * 1024 * 1024, 1, &OS)
+//!         .unwrap();
+//! }
 //!
 //! // Small allocations go through slab allocator
 //! let layout = Layout::from_size_align(64, 8).unwrap();
@@ -62,7 +80,18 @@
 //!
 //! const PAGE_SIZE: usize = 0x1000;
 //! let mut allocator = GlobalAllocator::<PAGE_SIZE>::new();
-//! allocator.init(0x8000_0000, 16 * 1024 * 1024).unwrap();
+//! struct DemoOs;
+//! impl buddy_slab_allocator::Os for DemoOs {
+//!     fn current_cpu_idx(&self) -> usize { 0 }
+//! }
+//! static OS: DemoOs = DemoOs;
+//! let meta_start = 0x8100_0000;
+//! let meta_size = GlobalAllocator::<PAGE_SIZE>::required_metadata_size(1);
+//! unsafe {
+//!     allocator
+//!         .init(meta_start, meta_size, 0x8000_0000, 16 * 1024 * 1024, 1, &OS)
+//!         .unwrap();
+//! }
 //!
 //! let stats = allocator.get_stats();
 //! println!("Total pages: {}", stats.total_pages);
@@ -77,6 +106,8 @@ extern crate alloc;
 
 mod error;
 pub use error::{AllocError, AllocResult};
+mod os;
+pub use os::{current_cpu_idx, NoImplOs, Os};
 
 /// Default page size for backward compatibility (4KB)
 pub const DEFAULT_PAGE_SIZE: usize = 0x1000;
@@ -138,7 +169,9 @@ pub mod page_allocator;
 pub use page_allocator::CompositePageAllocator;
 
 pub mod slab;
-pub use slab::slab_byte_allocator::{PageAllocatorForSlab, SizeClass, SlabByteAllocator};
+pub use slab::slab_byte_allocator::{
+    SizeClass, SlabAllocDecision, SlabByteAllocator, SlabDeallocDecision,
+};
 
 pub mod global_allocator;
 pub use global_allocator::GlobalAllocator;

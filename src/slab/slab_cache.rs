@@ -5,7 +5,7 @@
 
 use log::{error, warn};
 
-use super::slab_byte_allocator::{PageAllocatorForSlab as BytePageAllocator, SizeClass};
+use super::slab_byte_allocator::SizeClass;
 use super::slab_node::SlabNode;
 use crate::{AllocError, AllocResult};
 
@@ -86,7 +86,21 @@ impl SlabIntrusiveList {
     }
 }
 
-/// Slab cache for a specific size class
+/// Internal deallocation result for a single size-class cache.
+pub(crate) enum CacheDeallocDecision {
+    Done {
+        bytes_released: usize,
+        actually_deallocated: bool,
+    },
+    ReleaseSlab {
+        slab_base: usize,
+        page_count: usize,
+        slab_bytes: usize,
+        actually_deallocated: bool,
+    },
+}
+
+/// Slab cache for a specific size class.
 pub struct SlabCache {
     size_class: SizeClass,
     empty: SlabIntrusiveList,
@@ -104,14 +118,11 @@ impl SlabCache {
         }
     }
 
-    /// Allocate an object from this cache
-    /// Returns (object_addr, bytes_allocated_from_page_allocator)
-    pub fn alloc_object(
-        &mut self,
-        page_allocator: &mut dyn BytePageAllocator,
-        page_size: usize,
-    ) -> AllocResult<(usize, usize)> {
-        // 1. Try to allocate from partial list
+    /// Try to allocate an object from this cache.
+    ///
+    /// Returns `Ok(Some(addr))` if allocation succeeds, `Ok(None)` if the cache
+    /// needs the caller to provide a slab page, or an error if metadata is invalid.
+    pub fn alloc_object(&mut self) -> AllocResult<Option<usize>> {
         if let Some(slab_base) = self.partial.back() {
             let mut node = SlabNode::new(slab_base, self.size_class);
             if !node.is_valid_for_size_class() {
@@ -123,12 +134,13 @@ impl SlabCache {
                     self.partial.remove(self.size_class, slab_base);
                     self.full.push_back(self.size_class, slab_base);
                 }
-                return Ok((obj_addr, 0));
+                return Ok(Some(obj_addr));
             }
-            panic!("Allocation from partial slab failed despite free_count > 0, bitmap inconsistency detected");
+            panic!(
+                "Allocation from partial slab failed despite free_count > 0, bitmap inconsistency detected"
+            );
         }
 
-        // 2. Try to allocate from empty list
         if let Some(slab_base) = self.empty.pop_back(self.size_class) {
             let mut node = SlabNode::new(slab_base, self.size_class);
             if !node.is_valid_for_size_class() {
@@ -137,82 +149,38 @@ impl SlabCache {
             if let Some(obj_idx) = node.alloc_object() {
                 let obj_addr = node.object_addr(obj_idx);
                 self.partial.push_back(self.size_class, slab_base);
-
-                let prealloc_bytes = self.preallocate_empty_slab(page_allocator, page_size);
-                return Ok((obj_addr, prealloc_bytes));
+                return Ok(Some(obj_addr));
             }
-            panic!("Allocation from empty slab failed despite all objects being free, bitmap inconsistency detected");
+            panic!(
+                "Allocation from empty slab failed despite all objects being free, bitmap inconsistency detected"
+            );
         }
 
-        // 3. Allocate a new node from page allocator
-        let (obj_addr, bytes) = self.allocate_new_slab(page_allocator, page_size)?;
-        Ok((obj_addr, bytes))
+        Ok(None)
     }
 
-    /// Allocate a new slab from page allocator
-    /// Returns (object_addr, bytes_allocated_from_page_allocator)
-    fn allocate_new_slab(
+    /// Insert a freshly provided slab page into this cache.
+    pub fn provide_slab(
         &mut self,
-        page_allocator: &mut dyn BytePageAllocator,
-        page_size: usize,
-    ) -> AllocResult<(usize, usize)> {
-        let object_size = self.size_class.size();
-        let bytes_needed = SlabNode::MAX_OBJECTS * object_size;
-        let page_count = bytes_needed.div_ceil(page_size);
-        let slab_bytes = page_count * page_size;
-
-        let start_addr = page_allocator.alloc_pages(page_count, slab_bytes)?;
-
-        let mut new_node = SlabNode::new(start_addr, self.size_class);
-        new_node.init_header(slab_bytes);
-
-        if let Some(obj_idx) = new_node.alloc_object() {
-            let obj_addr = new_node.object_addr(obj_idx);
-            self.partial.push_back(self.size_class, start_addr);
-
-            let prealloc_bytes = self.preallocate_empty_slab(page_allocator, page_size);
-            return Ok((obj_addr, slab_bytes + prealloc_bytes));
+        slab_base: usize,
+        slab_bytes: usize,
+        owner_cpu: usize,
+    ) -> AllocResult<()> {
+        let mut node = SlabNode::new(slab_base, self.size_class);
+        node.init_header(slab_bytes, owner_cpu);
+        if node.free_count() == 0 {
+            return Err(AllocError::InvalidParam);
         }
-
-        // This should never happen - newly initialized slab must have at least one free object
-        panic!("Failed to allocate from newly initialized slab: bitmap inconsistency or corruption detected");
+        self.empty.push_back(self.size_class, slab_base);
+        Ok(())
     }
 
-    /// Pre-allocate an empty slab for future allocations
-    /// Returns bytes allocated from page allocator (0 if already has empty nodes)
-    fn preallocate_empty_slab(
-        &mut self,
-        page_allocator: &mut dyn BytePageAllocator,
-        page_size: usize,
-    ) -> usize {
-        if self.empty.len() > 0 {
-            return 0;
-        }
-
-        let object_size = self.size_class.size();
-        let bytes_needed = SlabNode::MAX_OBJECTS * object_size;
-        let page_count = bytes_needed.div_ceil(page_size);
-        let slab_bytes = page_count * page_size;
-
-        if let Ok(start_addr) = page_allocator.alloc_pages(page_count, slab_bytes) {
-            let mut new_node = SlabNode::new(start_addr, self.size_class);
-            new_node.init_header(slab_bytes);
-            self.empty.push_back(self.size_class, start_addr);
-            return slab_bytes;
-        }
-
-        0
-    }
-
-    /// Deallocate an object
-    /// Returns (bytes_freed_from_page_allocator, actually_deallocated)
-    /// actually_deallocated is false if this was a double-free
-    pub fn dealloc_object(
+    /// Deallocate an object from this cache.
+    pub(crate) fn dealloc_object(
         &mut self,
         obj_addr: usize,
-        page_allocator: &mut dyn BytePageAllocator,
         page_size: usize,
-    ) -> (usize, bool) {
+    ) -> CacheDeallocDecision {
         let object_size = self.size_class.size();
         let bytes_needed = SlabNode::MAX_OBJECTS * object_size;
         let page_count = bytes_needed.div_ceil(page_size);
@@ -221,56 +189,62 @@ impl SlabCache {
         let slab_base = align_down_any(obj_addr, slab_bytes);
         let mut node = SlabNode::new(slab_base, self.size_class);
         if !node.is_valid_for_size_class() {
-            // This can happen if the slab was already returned to the page allocator
-            // and the memory was reused, or if the pointer is completely invalid.
-            // For robustness, especially in double-free tests, we return false.
             warn!(
                 "slab allocator: Invalid slab base {:#x} for size class {:?}",
                 slab_base, self.size_class
             );
-            warn!("this can happen if the slab was already returned to the page allocator and the memory was reused, 
-                or if the pointer is completely invalid");
-            return (0, false);
+            warn!(
+                "this can happen if the slab was already returned to the page allocator and the memory was reused, or if the pointer is completely invalid"
+            );
+            return CacheDeallocDecision::Done {
+                bytes_released: 0,
+                actually_deallocated: false,
+            };
         }
 
         let was_full = node.is_full();
-        let (should_dealloc_slab, actually_freed) =
+        let (should_release_slab, actually_freed) =
             if let Some(obj_idx) = node.object_index_from_addr(obj_addr) {
-                // dealloc_object returns true if object was allocated, false if already free (double-free)
                 let actually_freed = node.dealloc_object(obj_idx);
                 (node.is_empty() && actually_freed, actually_freed)
             } else {
                 error!("Invalid address {obj_addr:x} in slab at {slab_base:x}: not a valid object");
-                return (0, true); // Not a double-free, just invalid address (treat as no-op)
+                return CacheDeallocDecision::Done {
+                    bytes_released: 0,
+                    actually_deallocated: true,
+                };
             };
 
-        // Only manipulate lists if this was not a double-free
         if actually_freed {
-            // Remove slab from its current list before moving or deallocating it
             if was_full {
                 self.full.remove(self.size_class, slab_base);
             } else {
                 self.partial.remove(self.size_class, slab_base);
             }
 
-            if should_dealloc_slab {
-                // Slab became empty - either deallocate or move to empty list
+            if should_release_slab {
                 if self.empty.len() >= 2 {
-                    page_allocator.dealloc_pages(slab_base, page_count);
-                    return (slab_bytes, true);
-                } else {
-                    self.empty.push_back(self.size_class, slab_base);
-                    return (0, true);
+                    return CacheDeallocDecision::ReleaseSlab {
+                        slab_base,
+                        page_count,
+                        slab_bytes,
+                        actually_deallocated: true,
+                    };
                 }
+                self.empty.push_back(self.size_class, slab_base);
+                return CacheDeallocDecision::Done {
+                    bytes_released: 0,
+                    actually_deallocated: true,
+                };
             }
 
-            // Slab still has objects - if it was full, it's now partial
-            if was_full {
-                self.partial.push_back(self.size_class, slab_base);
-            }
+            self.partial.push_back(self.size_class, slab_base);
         }
 
-        (0, actually_freed)
+        CacheDeallocDecision::Done {
+            bytes_released: 0,
+            actually_deallocated: actually_freed,
+        }
     }
 }
 
@@ -280,7 +254,6 @@ mod tests {
     use alloc::alloc::{alloc, dealloc};
     use core::alloc::Layout;
 
-    // Re-import SizeClass for tests
     use super::super::slab_byte_allocator::SizeClass;
 
     struct MockPageAllocator {
@@ -293,9 +266,7 @@ mod tests {
                 allocated: alloc::vec::Vec::new(),
             }
         }
-    }
 
-    impl BytePageAllocator for MockPageAllocator {
         fn alloc_pages(&mut self, num_pages: usize, alignment: usize) -> AllocResult<usize> {
             let size = num_pages * 4096;
             let layout =
@@ -308,6 +279,7 @@ mod tests {
             Ok(addr)
         }
 
+        #[allow(dead_code)]
         fn dealloc_pages(&mut self, pos: usize, num_pages: usize) {
             if let Some(idx) = self
                 .allocated
@@ -320,33 +292,43 @@ mod tests {
         }
     }
 
+    fn provide_cache_slab(cache: &mut SlabCache, page_allocator: &mut MockPageAllocator) {
+        let page_count = SlabNode::new(0, SizeClass::Bytes64).page_count(4096);
+        let slab_bytes = page_count * 4096;
+        let slab_base = page_allocator.alloc_pages(page_count, slab_bytes).unwrap();
+        cache.provide_slab(slab_base, slab_bytes, 0).unwrap();
+    }
+
     #[test]
     fn test_alloc_dealloc() {
         let mut cache = SlabCache::new(SizeClass::Bytes64);
         let mut page_allocator = MockPageAllocator::new();
+        provide_cache_slab(&mut cache, &mut page_allocator);
 
-        let (obj_addr, _) = cache.alloc_object(&mut page_allocator, 4096).unwrap();
-
+        let obj_addr = cache.alloc_object().unwrap().unwrap();
         assert_ne!(obj_addr, 0);
 
-        cache.dealloc_object(obj_addr, &mut page_allocator, 4096);
+        match cache.dealloc_object(obj_addr, 4096) {
+            CacheDeallocDecision::Done { .. } | CacheDeallocDecision::ReleaseSlab { .. } => {}
+        }
     }
 
     #[test]
     fn test_multiple_allocs() {
         let mut cache = SlabCache::new(SizeClass::Bytes64);
         let mut page_allocator = MockPageAllocator::new();
+        provide_cache_slab(&mut cache, &mut page_allocator);
 
         let mut addrs = alloc::vec::Vec::new();
         for _ in 0..10 {
-            let (addr, _) = cache.alloc_object(&mut page_allocator, 4096).unwrap();
+            let addr = cache.alloc_object().unwrap().unwrap();
             addrs.push(addr);
         }
 
         assert_eq!(addrs.len(), 10);
 
         for addr in addrs {
-            cache.dealloc_object(addr, &mut page_allocator, 4096);
+            cache.dealloc_object(addr, 4096);
         }
     }
 
@@ -354,15 +336,16 @@ mod tests {
     fn test_empty_node_management() {
         let mut cache = SlabCache::new(SizeClass::Bytes64);
         let mut page_allocator = MockPageAllocator::new();
+        provide_cache_slab(&mut cache, &mut page_allocator);
 
-        let (addr1, _) = cache.alloc_object(&mut page_allocator, 4096).unwrap();
-        cache.dealloc_object(addr1, &mut page_allocator, 4096);
+        let addr1 = cache.alloc_object().unwrap().unwrap();
+        cache.dealloc_object(addr1, 4096);
 
-        let (addr2, _) = cache.alloc_object(&mut page_allocator, 4096).unwrap();
-        cache.dealloc_object(addr2, &mut page_allocator, 4096);
+        let addr2 = cache.alloc_object().unwrap().unwrap();
+        cache.dealloc_object(addr2, 4096);
 
-        let (addr3, _) = cache.alloc_object(&mut page_allocator, 4096).unwrap();
-        cache.dealloc_object(addr3, &mut page_allocator, 4096);
+        let addr3 = cache.alloc_object().unwrap().unwrap();
+        cache.dealloc_object(addr3, 4096);
 
         assert!(cache.empty.len() <= 2);
     }
