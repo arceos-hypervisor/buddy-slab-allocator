@@ -22,8 +22,8 @@ cfg-if = "1.0"
 log = { version = "0.4", optional = true }
 
 [dev-dependencies]
-criterion = { version = "0.4", features = ["html_reports"] }
-rand = { version = "0.8", features = ["small_rng"] }
+criterion = { version = "0.8", features = ["html_reports"] }
+rand = { version = "0.10", features = ["std_rng"] }
 
 [[bench]]
 name = "global_allocator"

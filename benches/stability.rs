@@ -9,7 +9,7 @@
 
 use buddy_slab_allocator::GlobalAllocator;
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use std::alloc::Layout;
 use std::alloc::{alloc, dealloc};
 
@@ -41,15 +41,15 @@ fn bench_random_pattern_stability(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(iter), &iter, |b, _| {
             let mut allocator = GlobalAllocator::<PAGE_SIZE>::new();
             allocator.init(heap_ptr as usize, HEAP_SIZE).unwrap();
-            let mut rng = rand::rngs::SmallRng::from_seed([0; 32]);
+            let mut rng = rand::rngs::StdRng::from_seed([0; 32]);
 
             b.iter(|| {
                 let mut allocated = Vec::new();
 
                 for _ in 0..iter {
-                    if allocated.is_empty() || rng.gen_bool(0.6) {
+                    if allocated.is_empty() || rng.random_bool(0.6) {
                         // 60% allocate
-                        let size = rng.gen_range(8..8193);
+                        let size = rng.random_range(8..8193);
                         let size = if size <= 2048 {
                             size
                         } else {
@@ -62,7 +62,7 @@ fn bench_random_pattern_stability(c: &mut Criterion) {
                         }
                     } else {
                         // 40% deallocate
-                        let idx = rng.gen_range(0..allocated.len());
+                        let idx = rng.random_range(0..allocated.len());
                         let (ptr, layout) = allocated.swap_remove(idx);
                         allocator.dealloc(ptr, layout);
                     }
@@ -222,11 +222,11 @@ fn bench_long_running(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(duration), &duration, |b, _| {
             let mut allocator = GlobalAllocator::<PAGE_SIZE>::new();
             allocator.init(heap_ptr as usize, HEAP_SIZE).unwrap();
-            let mut rng = rand::rngs::SmallRng::from_seed([0; 32]);
+            let mut rng = rand::rngs::StdRng::from_seed([0; 32]);
 
             b.iter(|| {
                 for _ in 0..duration {
-                    let size = rng.gen_range(8..2049);
+                    let size = rng.random_range(8..2049);
                     let layout = Layout::from_size_align(size, 8).unwrap();
                     let ptr = allocator.alloc(layout);
 
@@ -259,14 +259,14 @@ fn bench_rapid_mixed_sizes(c: &mut Criterion) {
     c.bench_function("stress_rapid_mixed", |b| {
         let mut allocator = GlobalAllocator::<PAGE_SIZE>::new();
         allocator.init(heap_ptr as usize, HEAP_SIZE).unwrap();
-        let mut rng = rand::rngs::SmallRng::from_seed([0; 32]);
+        let mut rng = rand::rngs::StdRng::from_seed([0; 32]);
 
         b.iter(|| {
             let mut allocated = Vec::new();
 
             // Rapid mixed-size allocations
             for _ in 0..5000 {
-                let size = rng.gen_range(8..16385);
+                let size = rng.random_range(8..16385);
                 let aligned_size = if size <= 2048 {
                     size
                 } else {
@@ -275,7 +275,7 @@ fn bench_rapid_mixed_sizes(c: &mut Criterion) {
                 let layout = Layout::from_size_align(aligned_size, 8).unwrap();
 
                 if let Ok(ptr) = allocator.alloc(layout) {
-                    if rng.gen_bool(0.5) {
+                    if rng.random_bool(0.5) {
                         // Immediately free 50% of allocations
                         allocator.dealloc(ptr, layout);
                     } else {
@@ -354,11 +354,11 @@ fn bench_memory_leak_detection(c: &mut Criterion) {
 
         b.iter(|| {
             let mut ptrs = Vec::new();
-            let mut rng = rand::rngs::SmallRng::from_seed([0; 32]);
+            let mut rng = rand::rngs::StdRng::from_seed([0; 32]);
 
             // Perform random allocations
             for _ in 0..1000 {
-                let size = rng.gen_range(8..2049);
+                let size = rng.random_range(8..2049);
                 let layout = Layout::from_size_align(size, 8).unwrap();
                 if let Ok(ptr) = allocator.alloc(layout) {
                     ptrs.push((ptr, layout));

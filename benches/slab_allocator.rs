@@ -7,7 +7,7 @@ use buddy_slab_allocator::{
     BaseAllocator, ByteAllocator, CompositePageAllocator, PageAllocatorForSlab, SlabByteAllocator,
 };
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use std::alloc::Layout;
 use std::alloc::{alloc, dealloc};
 
@@ -156,11 +156,11 @@ fn bench_random_allocations(c: &mut Criterion) {
     slab_alloc.set_page_allocator(&mut page_alloc as *mut _ as *mut dyn PageAllocatorForSlab);
 
     c.bench_function("slab_random_allocations", |b| {
-        let mut rng = rand::rngs::SmallRng::from_seed([0; 32]);
+        let mut rng = rand::rngs::StdRng::from_seed([0; 32]);
 
         b.iter(|| {
             for _ in 0..100 {
-                let size: usize = rng.gen_range(8..2049);
+                let size: usize = rng.random_range(8..2049);
                 let size = if size.is_power_of_two() {
                     size
                 } else {
@@ -240,23 +240,23 @@ fn bench_stress_test(c: &mut Criterion) {
     slab_alloc.set_page_allocator(&mut page_alloc as *mut _ as *mut dyn PageAllocatorForSlab);
 
     c.bench_function("slab_stress_test", |b| {
-        let mut rng = rand::rngs::SmallRng::from_seed([0; 32]);
+        let mut rng = rand::rngs::StdRng::from_seed([0; 32]);
 
         b.iter(|| {
             let mut allocated = Vec::new();
 
             // Stress test: rapid alloc/dealloc with varying sizes
             for _ in 0..1000 {
-                if allocated.is_empty() || rng.gen_bool(0.7) {
+                if allocated.is_empty() || rng.random_bool(0.7) {
                     // Allocate
-                    let size = rng.gen_range(8..2049);
+                    let size = rng.random_range(8..2049);
                     let layout = Layout::from_size_align(size, 8).unwrap();
                     if let Ok(ptr) = slab_alloc.alloc(layout) {
                         allocated.push((ptr, layout));
                     }
                 } else {
                     // Deallocate random
-                    let idx = rng.gen_range(0..allocated.len());
+                    let idx = rng.random_range(0..allocated.len());
                     let (ptr, layout) = allocated.swap_remove(idx);
                     slab_alloc.dealloc(ptr, layout);
                 }

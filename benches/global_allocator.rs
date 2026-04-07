@@ -5,7 +5,7 @@
 
 use buddy_slab_allocator::GlobalAllocator;
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use std::alloc::Layout;
 use std::alloc::{alloc, dealloc};
 
@@ -145,12 +145,12 @@ fn bench_random_allocations(c: &mut Criterion) {
     c.bench_function("global_random_allocations", |b| {
         let mut allocator = GlobalAllocator::<PAGE_SIZE>::new();
         allocator.init(heap_ptr as usize, HEAP_SIZE).unwrap();
-        let mut rng = rand::rngs::SmallRng::from_seed([0; 32]);
+        let mut rng = rand::rngs::StdRng::from_seed([0; 32]);
 
         b.iter(|| {
             // 100 random allocations
             for _ in 0..100 {
-                let size: usize = rng.gen_range(8..2048);
+                let size: usize = rng.random_range(8..2048);
                 let size = size.next_power_of_two();
                 let layout = Layout::from_size_align(size, 8).unwrap();
                 let ptr = allocator.alloc(layout).unwrap();

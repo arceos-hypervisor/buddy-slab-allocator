@@ -7,7 +7,7 @@ use buddy_slab_allocator::{
     BaseAllocator, BuddyPageAllocator, CompositePageAllocator, PageAllocator,
 };
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use std::alloc::Layout;
 use std::alloc::{alloc, dealloc};
 
@@ -172,23 +172,23 @@ fn bench_random_pattern(c: &mut Criterion) {
     c.bench_function("buddy_random_pattern", |b| {
         let mut allocator = BuddyPageAllocator::<PAGE_SIZE>::new();
         allocator.init(heap_ptr as usize, HEAP_SIZE);
-        let mut rng = rand::rngs::SmallRng::from_seed([0; 32]);
+        let mut rng = rand::rngs::StdRng::from_seed([0; 32]);
 
         b.iter(|| {
             let mut allocated = Vec::new();
 
             // Random alloc/dealloc pattern
             for _ in 0..1000 {
-                if allocated.is_empty() || rng.gen_bool(0.7) {
+                if allocated.is_empty() || rng.random_bool(0.7) {
                     // Allocate
-                    let pages = 1 << rng.gen_range(0..5); // 1, 2, 4, 8, 16 pages
+                    let pages = 1 << rng.random_range(0..5); // 1, 2, 4, 8, 16 pages
                     match allocator.alloc_pages(pages, PAGE_SIZE) {
                         Ok(addr) => allocated.push((addr, pages)),
                         Err(_) => break, // Out of memory
                     }
                 } else {
                     // Deallocate random item
-                    let idx = rng.gen_range(0..allocated.len());
+                    let idx = rng.random_range(0..allocated.len());
                     let (addr, pages) = allocated.swap_remove(idx);
                     allocator.dealloc_pages(addr, pages);
                 }
