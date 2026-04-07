@@ -34,7 +34,3 @@ harness = false
 [[bench]]
 name = "slab_allocator"
 harness = false
-
-[[bench]]
-name = "stability"
-harness = false

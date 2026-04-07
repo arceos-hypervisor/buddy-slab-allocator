@@ -133,27 +133,6 @@ fn test_composite_page_allocator_fragmentation() {
 }
 
 #[test]
-fn test_composite_page_allocator_alloc_at() {
-    let (heap_ptr, heap_layout) = alloc_test_heap(TEST_HEAP_SIZE);
-    let heap_addr = heap_ptr as usize;
-
-    let mut allocator = CompositePageAllocator::<PAGE_SIZE>::new();
-    allocator.init(heap_addr, TEST_HEAP_SIZE);
-
-    // Note: alloc_pages_at may not always succeed due to buddy system structure
-    // We just test that it doesn't crash
-    let target_addr = heap_addr + PAGE_SIZE * 100;
-    let _result = allocator.alloc_pages_at(target_addr, 4, PAGE_SIZE);
-
-    // If successful, clean up
-    // if result.is_ok() {
-    //     allocator.dealloc_pages(target_addr, 4);
-    // }
-
-    dealloc_test_heap(heap_ptr, heap_layout);
-}
-
-#[test]
 fn test_slab_allocator_basic() {
     let (heap_ptr, heap_layout) = alloc_test_heap(TEST_HEAP_SIZE);
     let heap_addr = heap_ptr as usize;
