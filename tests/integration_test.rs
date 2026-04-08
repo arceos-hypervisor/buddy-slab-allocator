@@ -3,7 +3,7 @@
 extern crate buddy_slab_allocator;
 
 use buddy_slab_allocator::{
-    BuddyAllocator, GlobalAllocator, OsImpl, SizeClass, SlabAllocResult, SlabAllocator,
+    AllocError, BuddyAllocator, GlobalAllocator, OsImpl, SizeClass, SlabAllocResult, SlabAllocator,
     SlabDeallocResult,
 };
 use core::alloc::Layout;
@@ -58,6 +58,10 @@ fn host_alloc(size: usize, align: usize) -> (*mut u8, Layout) {
 
 fn host_dealloc(ptr: *mut u8, layout: Layout) {
     unsafe { dealloc(ptr, layout) };
+}
+
+fn align_up(value: usize, align: usize) -> usize {
+    (value + align - 1) & !(align - 1)
 }
 
 // ======================================================================
@@ -118,6 +122,30 @@ fn buddy_alignment() {
 
     buddy.dealloc_pages(addr2, 1);
     buddy.dealloc_pages(addr4, 1);
+
+    host_dealloc(meta_ptr, meta_layout);
+    host_dealloc(heap_ptr, heap_layout);
+}
+
+#[test]
+fn buddy_aligned_alloc_dealloc_uses_recorded_order() {
+    let heap_size = 64 * PAGE_SIZE;
+    let (heap_ptr, heap_layout) = host_alloc(heap_size, PAGE_SIZE * 16);
+    let heap_addr = heap_ptr as usize;
+    let meta_size = BuddyAllocator::<PAGE_SIZE>::required_meta_size(heap_size);
+    let (meta_ptr, meta_layout) = host_alloc(meta_size, 16);
+
+    let mut buddy = BuddyAllocator::<PAGE_SIZE>::new();
+    unsafe {
+        buddy
+            .init(meta_ptr, meta_size, heap_addr, heap_size, None)
+            .unwrap();
+    }
+
+    let free_before = buddy.free_pages();
+    let addr = buddy.alloc_pages(4, PAGE_SIZE * 16).unwrap();
+    buddy.dealloc_pages(addr, 4);
+    assert_eq!(buddy.free_pages(), free_before);
 
     host_dealloc(meta_ptr, meta_layout);
     host_dealloc(heap_ptr, heap_layout);
@@ -334,75 +362,63 @@ fn slab_all_size_classes() {
 
 fn init_global(
     allocator: &GlobalAllocator<PAGE_SIZE>,
-    heap_addr: usize,
-    heap_size: usize,
+    region_start: usize,
+    region_size: usize,
     cpu_count: usize,
-) -> (*mut u8, Layout) {
-    let meta_size = GlobalAllocator::<PAGE_SIZE>::required_metadata_size(heap_size, cpu_count);
-    let meta_align = GlobalAllocator::<PAGE_SIZE>::required_metadata_align();
-    let (meta_ptr, meta_layout) = host_alloc(meta_size, meta_align.max(8));
-    unsafe {
-        allocator
-            .init(
-                meta_ptr, meta_size, heap_addr, heap_size, cpu_count, &TEST_OS,
-            )
-            .unwrap();
-    }
-    (meta_ptr, meta_layout)
+) {
+    unsafe { allocator.init(region_start, region_size, cpu_count, &TEST_OS).unwrap() };
 }
 
 #[test]
 fn global_page_alloc() {
-    let (heap_ptr, heap_layout) = host_alloc(TEST_HEAP_SIZE, PAGE_SIZE * 4);
-    let heap_addr = heap_ptr as usize;
+    let (region_ptr, region_layout) = host_alloc(TEST_HEAP_SIZE, PAGE_SIZE * 4);
+    let region_addr = region_ptr as usize;
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    let (meta_ptr, meta_layout) = init_global(&allocator, heap_addr, TEST_HEAP_SIZE, 1);
+    init_global(&allocator, region_addr, TEST_HEAP_SIZE, 1);
+
+    let managed_start = allocator.managed_heap_start();
+    let managed_end = managed_start + allocator.managed_heap_size();
 
     let addr = allocator.alloc_pages(4, PAGE_SIZE).unwrap();
-    assert!(addr >= heap_addr && addr < heap_addr + TEST_HEAP_SIZE);
+    assert!(managed_start > region_addr);
+    assert!(addr >= managed_start && addr < managed_end);
     assert_eq!(addr % PAGE_SIZE, 0);
     allocator.dealloc_pages(addr, 4);
 
-    host_dealloc(meta_ptr, meta_layout);
-    host_dealloc(heap_ptr, heap_layout);
+    host_dealloc(region_ptr, region_layout);
 }
 
 #[test]
 fn global_small_alloc() {
-    let (heap_ptr, heap_layout) = host_alloc(TEST_HEAP_SIZE, PAGE_SIZE * 4);
-    let heap_addr = heap_ptr as usize;
+    let (region_ptr, region_layout) = host_alloc(TEST_HEAP_SIZE, PAGE_SIZE * 4);
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    let (meta_ptr, meta_layout) = init_global(&allocator, heap_addr, TEST_HEAP_SIZE, 1);
+    init_global(&allocator, region_ptr as usize, TEST_HEAP_SIZE, 1);
 
     let layout = Layout::from_size_align(64, 8).unwrap();
     let ptr = allocator.alloc(layout).unwrap();
     unsafe { allocator.dealloc(ptr, layout) };
 
-    host_dealloc(meta_ptr, meta_layout);
-    host_dealloc(heap_ptr, heap_layout);
+    host_dealloc(region_ptr, region_layout);
 }
 
 #[test]
 fn global_large_alloc() {
-    let (heap_ptr, heap_layout) = host_alloc(TEST_HEAP_SIZE, PAGE_SIZE * 4);
-    let heap_addr = heap_ptr as usize;
+    let (region_ptr, region_layout) = host_alloc(TEST_HEAP_SIZE, PAGE_SIZE * 4);
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    let (meta_ptr, meta_layout) = init_global(&allocator, heap_addr, TEST_HEAP_SIZE, 1);
+    init_global(&allocator, region_ptr as usize, TEST_HEAP_SIZE, 1);
 
     let layout = Layout::from_size_align(8192, PAGE_SIZE).unwrap();
     let ptr = allocator.alloc(layout).unwrap();
     unsafe { allocator.dealloc(ptr, layout) };
 
-    host_dealloc(meta_ptr, meta_layout);
-    host_dealloc(heap_ptr, heap_layout);
+    host_dealloc(region_ptr, region_layout);
 }
 
 #[test]
 fn global_mixed_alloc() {
-    let (heap_ptr, heap_layout) = host_alloc(TEST_HEAP_SIZE, PAGE_SIZE * 4);
-    let heap_addr = heap_ptr as usize;
+    let (region_ptr, region_layout) = host_alloc(TEST_HEAP_SIZE, PAGE_SIZE * 4);
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    let (meta_ptr, meta_layout) = init_global(&allocator, heap_addr, TEST_HEAP_SIZE, 1);
+    init_global(&allocator, region_ptr as usize, TEST_HEAP_SIZE, 1);
 
     let sizes: &[(usize, usize)] = &[
         (8, 8),
@@ -421,16 +437,14 @@ fn global_mixed_alloc() {
         unsafe { allocator.dealloc(ptr, layout) };
     }
 
-    host_dealloc(meta_ptr, meta_layout);
-    host_dealloc(heap_ptr, heap_layout);
+    host_dealloc(region_ptr, region_layout);
 }
 
 #[test]
 fn global_cross_cpu_free() {
-    let (heap_ptr, heap_layout) = host_alloc(TEST_HEAP_SIZE, PAGE_SIZE * 4);
-    let heap_addr = heap_ptr as usize;
+    let (region_ptr, region_layout) = host_alloc(TEST_HEAP_SIZE, PAGE_SIZE * 4);
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    let (meta_ptr, meta_layout) = init_global(&allocator, heap_addr, TEST_HEAP_SIZE, 2);
+    init_global(&allocator, region_ptr as usize, TEST_HEAP_SIZE, 2);
 
     // Allocate on CPU 0
     TEST_OS.set_cpu(0);
@@ -451,8 +465,7 @@ fn global_cross_cpu_free() {
     let ptr = allocator.alloc(layout).unwrap();
     unsafe { allocator.dealloc(ptr, layout) };
 
-    host_dealloc(meta_ptr, meta_layout);
-    host_dealloc(heap_ptr, heap_layout);
+    host_dealloc(region_ptr, region_layout);
 }
 
 #[test]
@@ -473,30 +486,52 @@ fn global_lowmem_pages() {
     }
     static LOWMEM_OS: LowmemOs = LowmemOs;
 
-    let (heap_ptr, heap_layout) = host_alloc(TEST_HEAP_SIZE, PAGE_SIZE * 4);
-    let heap_addr = heap_ptr as usize;
+    let (region_ptr, region_layout) = host_alloc(TEST_HEAP_SIZE, PAGE_SIZE * 4);
+    let region_addr = region_ptr as usize;
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    let cpu_count = 1;
-    let meta_size = GlobalAllocator::<PAGE_SIZE>::required_metadata_size(TEST_HEAP_SIZE, cpu_count);
-    let meta_align = GlobalAllocator::<PAGE_SIZE>::required_metadata_align();
-    let (meta_ptr, meta_layout) = host_alloc(meta_size, meta_align.max(8));
-    unsafe {
-        allocator
-            .init(
-                meta_ptr,
-                meta_size,
-                heap_addr,
-                TEST_HEAP_SIZE,
-                cpu_count,
-                &LOWMEM_OS,
-            )
-            .unwrap();
-    }
+    unsafe { allocator.init(region_addr, TEST_HEAP_SIZE, 1, &LOWMEM_OS).unwrap() };
 
     let addr = allocator.alloc_pages_lowmem(1, PAGE_SIZE).unwrap();
-    assert!(addr >= heap_addr);
+    assert!(addr >= allocator.managed_heap_start());
     allocator.dealloc_pages(addr, 1);
 
-    host_dealloc(meta_ptr, meta_layout);
-    host_dealloc(heap_ptr, heap_layout);
+    host_dealloc(region_ptr, region_layout);
+}
+
+#[test]
+fn global_unaligned_region_start() {
+    let (region_ptr, region_layout) = host_alloc(TEST_HEAP_SIZE + PAGE_SIZE, PAGE_SIZE * 4);
+    let region_start = region_ptr as usize + 1;
+    let region_size = TEST_HEAP_SIZE;
+    let allocator = GlobalAllocator::<PAGE_SIZE>::new();
+    init_global(&allocator, region_start, region_size, 1);
+
+    let managed_start = allocator.managed_heap_start();
+    let managed_end = managed_start + allocator.managed_heap_size();
+
+    assert_eq!(managed_start % PAGE_SIZE, 0);
+    assert!(managed_start >= region_start);
+    assert!(managed_end <= region_start + region_size);
+
+    let addr = allocator.alloc_pages(1, PAGE_SIZE).unwrap();
+    assert!(addr >= managed_start && addr < managed_end);
+    allocator.dealloc_pages(addr, 1);
+
+    host_dealloc(region_ptr, region_layout);
+}
+
+#[test]
+fn global_rejects_region_without_one_managed_page() {
+    let buddy_meta_size = BuddyAllocator::<PAGE_SIZE>::required_meta_size(PAGE_SIZE);
+    let slab_align = core::mem::align_of::<spin::Mutex<SlabAllocator<PAGE_SIZE>>>();
+    let slab_offset = align_up(buddy_meta_size, slab_align);
+    let slab_size = core::mem::size_of::<spin::Mutex<SlabAllocator<PAGE_SIZE>>>();
+    let region_size = PAGE_SIZE + slab_offset + slab_size - 1;
+    let (region_ptr, region_layout) = host_alloc(region_size, PAGE_SIZE);
+    let allocator = GlobalAllocator::<PAGE_SIZE>::new();
+
+    let err = unsafe { allocator.init(region_ptr as usize, region_size, 1, &TEST_OS) }.unwrap_err();
+    assert_eq!(err, AllocError::InvalidParam);
+
+    host_dealloc(region_ptr, region_layout);
 }

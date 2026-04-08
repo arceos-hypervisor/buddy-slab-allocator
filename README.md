@@ -23,7 +23,7 @@ classDiagram
         -UsageStatsAtomic stats
         -AtomicBool initialized
         +new() GlobalAllocator
-        +init(meta_start, meta_size, heap_start, heap_size, cpu_count, os) AllocResult
+        +init(region_start, region_size, cpu_count, os) AllocResult
         +add_memory_region(start, size) AllocResult
         +alloc(Layout) Option~NonNull~u8~~
         +dealloc(ptr, Layout)
@@ -236,28 +236,27 @@ buddy-slab-allocator = { version = "0.2.0", features = ["tracking"] }
 The `GlobalAllocator` is the recommended interface. It automatically routes small allocations to per-CPU slab caches and large allocations to the buddy page allocator.
 
 ```rust
-use buddy_slab_allocator::{GlobalAllocator, Os};
+use buddy_slab_allocator::{GlobalAllocator, OsImpl};
 use core::alloc::Layout;
 
 const PAGE_SIZE: usize = 0x1000;
 
 struct DemoOs;
-impl Os for DemoOs {
+impl OsImpl for DemoOs {
     fn current_cpu_idx(&self) -> usize { 0 }
+    fn virt_to_phys(&self, vaddr: usize) -> usize { vaddr }
+    fn phys_to_virt(&self, paddr: usize) -> usize { paddr }
 }
 
 static OS: DemoOs = DemoOs;
 
-let mut allocator = GlobalAllocator::<PAGE_SIZE>::new();
-
-let meta_start = 0x8100_0000;
-let meta_size = GlobalAllocator::<PAGE_SIZE>::required_metadata_size(1);
-let heap_start = 0x8000_0000;
-let heap_size = 16 * 1024 * 1024;
+let allocator = GlobalAllocator::<PAGE_SIZE>::new();
+let region_start = 0x8000_0000;
+let region_size = 16 * 1024 * 1024;
 
 unsafe {
     allocator
-        .init(meta_start, meta_size, heap_start, heap_size, 1, &OS)
+        .init(region_start, region_size, 1, &OS)
         .unwrap();
 }
 
@@ -343,11 +342,16 @@ cargo test --features tracking
 # Check benchmarks compile
 cargo check --benches
 
-# Run benchmarks
+# Run all benchmarks
 cargo bench
+
+# Run one benchmark suite
+cargo bench --bench buddy_allocator
+cargo bench --bench slab_allocator
+cargo bench --bench global_allocator
 ```
 
-Detailed benchmark notes are in `benches/README_CN.md`.
+Benchmarks are built with `divan`. Detailed benchmark notes are in `benches/README_CN.md`.
 
 ## License
 

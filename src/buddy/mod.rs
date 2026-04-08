@@ -333,15 +333,28 @@ impl<const PAGE_SIZE: usize> BuddyAllocator<PAGE_SIZE> {
 
     /// Free pages previously obtained via [`alloc_pages`](Self::alloc_pages).
     ///
-    /// `addr` must be the exact address returned by alloc, and `count` must match.
+    /// `addr` must be the exact address returned by alloc. The allocator frees
+    /// the full block size recorded in page metadata, which may be larger than
+    /// `count` if the original allocation was rounded up for buddy order or alignment.
     pub fn dealloc_pages(&mut self, addr: usize, count: usize) {
         debug_assert!(is_aligned(addr, PAGE_SIZE));
         debug_assert!(addr >= self.heap_start);
+        debug_assert!(count > 0);
 
         let pfn = (addr - self.heap_start) / PAGE_SIZE;
         debug_assert!(pfn < self.max_pages);
+        let stored = unsafe { &*self.meta.add(pfn) };
+        debug_assert!(
+            stored.flags == PageFlags::Allocated || stored.flags == PageFlags::Slab,
+            "dealloc_pages called on non-allocated block"
+        );
 
-        let order = count.next_power_of_two().trailing_zeros() as usize;
+        let expected_order = count.next_power_of_two().trailing_zeros() as usize;
+        let order = stored.order as usize;
+        debug_assert!(
+            expected_order <= order,
+            "dealloc_pages count implies larger order than the allocated block"
+        );
         self.dealloc_order(pfn, order);
     }
 

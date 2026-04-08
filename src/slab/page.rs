@@ -114,11 +114,33 @@ impl SlabPageHeader {
         (addr - self.data_start(base)) / self.size_class.size()
     }
 
-    /// Base address (page start) from an object address.
-    /// Relies on slab_bytes being a power-of-two multiple of PAGE_SIZE.
+    /// Base address (slab start) from an object address.
+    ///
+    /// Searches backward by page because the slab base may no longer have
+    /// absolute `slab_bytes` alignment after metadata is carved from a region
+    /// prefix by [`GlobalAllocator`](crate::GlobalAllocator).
     #[inline]
-    pub fn base_from_obj_addr(addr: usize, slab_bytes: usize) -> usize {
-        addr & !(slab_bytes - 1)
+    pub fn base_from_obj_addr<const PAGE_SIZE: usize>(addr: usize, slab_bytes: usize) -> usize {
+        let slab_pages = slab_bytes / PAGE_SIZE;
+        debug_assert!(slab_pages > 0);
+
+        let page_base = addr & !(PAGE_SIZE - 1);
+        for page_idx in 0..slab_pages {
+            let Some(candidate) = page_base.checked_sub(page_idx * PAGE_SIZE) else {
+                break;
+            };
+            let hdr = unsafe { &*(candidate as *const SlabPageHeader) };
+            if hdr.magic == SLAB_MAGIC
+                && hdr.slab_bytes as usize == slab_bytes
+                && addr >= candidate
+                && addr < candidate + slab_bytes
+            {
+                return candidate;
+            }
+        }
+
+        debug_assert!(false, "object address does not belong to a live slab");
+        page_base
     }
 
     // ------------------------------------------------------------------

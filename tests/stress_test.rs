@@ -62,35 +62,13 @@ impl Drop for TestHeap {
     }
 }
 
-fn alloc_metadata(heap_size: usize, cpu_count: usize) -> (*mut u8, Layout) {
-    let size = GlobalAllocator::<PAGE_SIZE>::required_metadata_size(heap_size, cpu_count);
-    let align = GlobalAllocator::<PAGE_SIZE>::required_metadata_align().max(8);
-    let layout = Layout::from_size_align(size, align).unwrap();
-    let ptr = unsafe { alloc(layout) };
-    assert!(!ptr.is_null(), "failed to allocate metadata");
-    (ptr, layout)
-}
-
 fn init_allocator(
     allocator: &GlobalAllocator<PAGE_SIZE>,
     heap: &TestHeap,
     cpu_count: usize,
-) -> (*mut u8, Layout) {
-    let (meta_ptr, meta_layout) = alloc_metadata(HEAP_SIZE, cpu_count);
+) {
     MOCK_OS.set_cpu(0);
-    unsafe {
-        allocator
-            .init(
-                meta_ptr,
-                meta_layout.size(),
-                heap.addr(),
-                HEAP_SIZE,
-                cpu_count,
-                &MOCK_OS,
-            )
-            .unwrap();
-    }
-    (meta_ptr, meta_layout)
+    unsafe { allocator.init(heap.addr(), HEAP_SIZE, cpu_count, &MOCK_OS).unwrap() };
 }
 
 #[test]
@@ -98,7 +76,7 @@ fn init_allocator(
 fn stress_random_mixed_alloc_free() {
     let heap = TestHeap::new(HEAP_SIZE);
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    let (meta_ptr, meta_layout) = init_allocator(&allocator, &heap, 2);
+    init_allocator(&allocator, &heap, 2);
     let mut rng = rand::rngs::StdRng::from_seed([0; 32]);
     let mut allocated: Vec<(core::ptr::NonNull<u8>, Layout)> = Vec::new();
 
@@ -126,8 +104,6 @@ fn stress_random_mixed_alloc_free() {
     for (ptr, layout) in allocated {
         unsafe { allocator.dealloc(ptr, layout) };
     }
-
-    unsafe { dealloc(meta_ptr, meta_layout) };
 }
 
 #[test]
@@ -135,7 +111,7 @@ fn stress_random_mixed_alloc_free() {
 fn stress_exhaustion_recovery() {
     let heap = TestHeap::new(HEAP_SIZE);
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    let (meta_ptr, meta_layout) = init_allocator(&allocator, &heap, 1);
+    init_allocator(&allocator, &heap, 1);
     let layout = Layout::from_size_align(PAGE_SIZE, PAGE_SIZE).unwrap();
     let mut allocated = Vec::new();
 
@@ -157,8 +133,6 @@ fn stress_exhaustion_recovery() {
     for ptr in allocated {
         unsafe { allocator.dealloc(ptr, layout) };
     }
-
-    unsafe { dealloc(meta_ptr, meta_layout) };
 }
 
 #[test]
@@ -166,7 +140,7 @@ fn stress_exhaustion_recovery() {
 fn stress_fragmentation_recovery() {
     let heap = TestHeap::new(HEAP_SIZE);
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    let (meta_ptr, meta_layout) = init_allocator(&allocator, &heap, 2);
+    init_allocator(&allocator, &heap, 2);
     let small_layout = Layout::from_size_align(64, 8).unwrap();
     let mut small_ptrs = Vec::new();
 
@@ -191,6 +165,4 @@ fn stress_fragmentation_recovery() {
     if let Ok(ptr) = large {
         unsafe { allocator.dealloc(ptr, large_layout) };
     }
-
-    unsafe { dealloc(meta_ptr, meta_layout) };
 }

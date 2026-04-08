@@ -155,7 +155,7 @@ impl SlabCache {
         obj_addr: usize,
     ) -> CacheDeallocResult {
         let slab_bytes = self.size_class.slab_pages(PAGE_SIZE) * PAGE_SIZE;
-        let base = SlabPageHeader::base_from_obj_addr(obj_addr, slab_bytes);
+        let base = SlabPageHeader::base_from_obj_addr::<PAGE_SIZE>(obj_addr, slab_bytes);
         let hdr = unsafe { &mut *(base as *mut SlabPageHeader) };
         let was_full = hdr.is_local_full() && !hdr.has_remote_frees();
 

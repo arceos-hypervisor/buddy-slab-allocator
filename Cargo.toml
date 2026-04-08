@@ -1,5 +1,6 @@
 [package]
 authors = ["Song Zhiyong <songzhyo@qq.com>"]
+autobenches = false
 categories = ["memory-management", "no-std", "embedded"]
 description = "Memory allocator with Buddy and Slab allocation"
 documentation = "https://docs.rs/buddy-slab-allocator"
@@ -19,4 +20,17 @@ log = "0.4"
 spin = "0.10"
 
 [dev-dependencies]
+divan = "0.1.21"
 rand = {version = "0.10", features = ["std_rng"]}
+
+[[bench]]
+name = "buddy_allocator"
+harness = false
+
+[[bench]]
+name = "slab_allocator"
+harness = false
+
+[[bench]]
+name = "global_allocator"
+harness = false

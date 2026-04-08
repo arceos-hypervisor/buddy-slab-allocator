@@ -15,6 +15,15 @@ use crate::slab::size_class::{SizeClass, SLAB_MAX_SIZE};
 use crate::slab::{SlabAllocResult, SlabAllocator, SlabDeallocResult};
 use crate::{align_up, OsImpl};
 
+struct RegionLayout {
+    meta_start: usize,
+    meta_size: usize,
+    buddy_meta_size: usize,
+    slab_offset: usize,
+    managed_heap_start: usize,
+    managed_heap_size: usize,
+}
+
 /// Unified allocator: buddy page allocator + per-CPU slab caches.
 pub struct GlobalAllocator<const PAGE_SIZE: usize = 0x1000> {
     buddy: SpinMutex<BuddyAllocator<PAGE_SIZE>>,
@@ -25,8 +34,8 @@ pub struct GlobalAllocator<const PAGE_SIZE: usize = 0x1000> {
 }
 
 // SAFETY: All mutable state is behind SpinMutex or AtomicBool.
-// `per_cpu_slabs` is a raw pointer into the metadata region whose lifetime
-// is managed by the caller (same as BuddyAllocator::meta).
+// `per_cpu_slabs` is a raw pointer into the reserved metadata prefix of the
+// caller-provided region (same lifetime model as BuddyAllocator::meta).
 unsafe impl<const PAGE_SIZE: usize> Sync for GlobalAllocator<PAGE_SIZE> {}
 unsafe impl<const PAGE_SIZE: usize> Send for GlobalAllocator<PAGE_SIZE> {}
 
@@ -35,23 +44,8 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
     // Metadata sizing
     // ------------------------------------------------------------------
 
-    /// Calculate the total metadata region size needed.
-    ///
-    /// The metadata region is laid out as:
-    /// ```text
-    /// [ PageMeta[max_pages] | padding | SpinMutex<SlabAllocator>[cpu_count] ]
-    /// ```
-    pub const fn required_metadata_size(heap_size: usize, cpu_count: usize) -> usize {
-        let buddy_meta = BuddyAllocator::<PAGE_SIZE>::required_meta_size(heap_size);
-        // Align slab array to its natural alignment.
-        let slab_align = core::mem::align_of::<SpinMutex<SlabAllocator<PAGE_SIZE>>>();
-        let slab_offset = (buddy_meta + slab_align - 1) & !(slab_align - 1);
-        let slab_size = core::mem::size_of::<SpinMutex<SlabAllocator<PAGE_SIZE>>>() * cpu_count;
-        slab_offset + slab_size
-    }
-
-    /// Required alignment for the metadata region.
-    pub const fn required_metadata_align() -> usize {
+    /// Required alignment for the reserved metadata prefix.
+    const fn metadata_align() -> usize {
         let a1 = core::mem::align_of::<crate::buddy::PageMeta>();
         let a2 = core::mem::align_of::<SpinMutex<SlabAllocator<PAGE_SIZE>>>();
         if a1 > a2 {
@@ -59,6 +53,96 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
         } else {
             a2
         }
+    }
+
+    fn metadata_layout_for_pages(
+        pages: usize,
+        cpu_count: usize,
+    ) -> Option<(usize, usize, usize)> {
+        let buddy_meta_size = pages.checked_mul(core::mem::size_of::<crate::buddy::PageMeta>())?;
+        let slab_align = core::mem::align_of::<SpinMutex<SlabAllocator<PAGE_SIZE>>>();
+        let slab_offset = align_up(buddy_meta_size, slab_align);
+        let slab_size =
+            core::mem::size_of::<SpinMutex<SlabAllocator<PAGE_SIZE>>>().checked_mul(cpu_count)?;
+        let meta_size = slab_offset.checked_add(slab_size)?;
+        Some((buddy_meta_size, slab_offset, meta_size))
+    }
+
+    fn available_heap_pages(region_end: usize, meta_start: usize, meta_size: usize) -> Option<usize> {
+        let managed_heap_start = align_up(meta_start.checked_add(meta_size)?, PAGE_SIZE);
+        if managed_heap_start > region_end {
+            return Some(0);
+        }
+        Some((region_end - managed_heap_start) / PAGE_SIZE)
+    }
+
+    fn can_manage_pages(
+        region_end: usize,
+        meta_start: usize,
+        cpu_count: usize,
+        pages: usize,
+    ) -> bool {
+        let Some((_, _, meta_size)) = Self::metadata_layout_for_pages(pages, cpu_count) else {
+            return false;
+        };
+        let Some(available_pages) =
+            Self::available_heap_pages(region_end, meta_start, meta_size)
+        else {
+            return false;
+        };
+        available_pages >= pages
+    }
+
+    fn compute_region_layout(
+        region_start: usize,
+        region_size: usize,
+        cpu_count: usize,
+    ) -> Option<RegionLayout> {
+        if cpu_count == 0 || region_size == 0 || !PAGE_SIZE.is_power_of_two() {
+            return None;
+        }
+
+        let region_end = region_start.checked_add(region_size)?;
+        let meta_start = align_up(region_start, Self::metadata_align());
+        if meta_start >= region_end {
+            return None;
+        }
+
+        let heap_search_start = align_up(region_start, PAGE_SIZE);
+        let max_pages = if heap_search_start >= region_end {
+            0
+        } else {
+            (region_end - heap_search_start) / PAGE_SIZE
+        };
+
+        let mut low = 0usize;
+        let mut high = max_pages;
+        while low < high {
+            let mid = low + (high - low).div_ceil(2);
+            if Self::can_manage_pages(region_end, meta_start, cpu_count, mid) {
+                low = mid;
+            } else {
+                high = mid - 1;
+            }
+        }
+
+        if low == 0 {
+            return None;
+        }
+
+        let (buddy_meta_size, slab_offset, meta_size) =
+            Self::metadata_layout_for_pages(low, cpu_count)?;
+        let managed_heap_start = align_up(meta_start.checked_add(meta_size)?, PAGE_SIZE);
+        let managed_heap_size = low.checked_mul(PAGE_SIZE)?;
+
+        Some(RegionLayout {
+            meta_start,
+            meta_size,
+            buddy_meta_size,
+            slab_offset,
+            managed_heap_start,
+            managed_heap_size,
+        })
     }
 
     // ------------------------------------------------------------------
@@ -87,47 +171,35 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
     /// Initialise the allocator.
     ///
     /// # Arguments
-    /// - `meta` / `meta_size` — writable metadata region (see [`required_metadata_size`]).
-    /// - `heap_start` / `heap_size` — the heap virtual address range to manage.
+    /// - `region_start` / `region_size` — total writable region to reserve for this allocator.
+    ///   The allocator carves metadata from the region prefix and manages the remaining tail.
     /// - `cpu_count` — number of CPUs (≥ 1).
     /// - `os` — platform abstraction.
     ///
     /// # Safety
-    /// - The metadata and heap regions must not overlap.
-    /// - `meta` must be aligned to [`required_metadata_align`].
-    /// - Both regions must remain valid for the lifetime of this allocator.
+    /// - `region_start..region_start + region_size` must be writable and remain valid for the
+    ///   lifetime of this allocator.
+    /// - Any bytes consumed by metadata or alignment padding become unavailable for allocation.
     pub unsafe fn init(
         &self,
-        meta: *mut u8,
-        meta_size: usize,
-        heap_start: usize,
-        heap_size: usize,
+        region_start: usize,
+        region_size: usize,
         cpu_count: usize,
         os: &'static dyn OsImpl,
     ) -> AllocResult {
-        if cpu_count == 0 || meta.is_null() {
-            return Err(AllocError::InvalidParam);
-        }
-        let required = Self::required_metadata_size(heap_size, cpu_count);
-        if meta_size < required {
-            return Err(AllocError::InvalidParam);
-        }
-
-        // --- Partition metadata region ---
-        let buddy_meta_size = BuddyAllocator::<PAGE_SIZE>::required_meta_size(heap_size);
-        let buddy_meta_ptr = meta;
-
-        let slab_align = core::mem::align_of::<SpinMutex<SlabAllocator<PAGE_SIZE>>>();
-        let slab_offset = align_up(buddy_meta_size, slab_align);
-        let slab_ptr = meta.add(slab_offset) as *mut SpinMutex<SlabAllocator<PAGE_SIZE>>;
+        let layout = Self::compute_region_layout(region_start, region_size, cpu_count)
+            .ok_or(AllocError::InvalidParam)?;
+        let meta_ptr = layout.meta_start as *mut u8;
+        let slab_ptr =
+            meta_ptr.add(layout.slab_offset) as *mut SpinMutex<SlabAllocator<PAGE_SIZE>>;
 
         // --- Init buddy ---
         let mut buddy = self.buddy.lock();
         buddy.init(
-            buddy_meta_ptr,
-            buddy_meta_size,
-            heap_start,
-            heap_size,
+            meta_ptr,
+            layout.buddy_meta_size,
+            layout.managed_heap_start,
+            layout.managed_heap_size,
             Some(os),
         )?;
         drop(buddy);
@@ -146,15 +218,27 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
         self.initialized.store(true, Ordering::Release);
 
         log::debug!(
-            "GlobalAllocator: {} CPUs, heap {:#x}+{:#x}, meta {:#x}+{:#x}",
+            "GlobalAllocator: {} CPUs, region {:#x}+{:#x}, meta {:#x}+{:#x}, managed heap {:#x}+{:#x}",
             cpu_count,
-            heap_start,
-            heap_size,
-            meta as usize,
-            meta_size,
+            region_start,
+            region_size,
+            layout.meta_start,
+            layout.meta_size,
+            layout.managed_heap_start,
+            layout.managed_heap_size,
         );
 
         Ok(())
+    }
+
+    /// Start address of the heap range actually managed by the buddy allocator.
+    pub fn managed_heap_start(&self) -> usize {
+        self.buddy.lock().heap_start()
+    }
+
+    /// Size in bytes of the heap range actually managed by the buddy allocator.
+    pub fn managed_heap_size(&self) -> usize {
+        self.buddy.lock().heap_size()
     }
 
     // ------------------------------------------------------------------
@@ -227,7 +311,6 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
             SlabAllocResult::NeedsSlab { size_class, pages } => {
                 drop(slab); // release slab lock before locking buddy
                 let bytes = pages * PAGE_SIZE;
-                // Align to slab_bytes so base_from_obj_addr works via address masking.
                 let addr = self.buddy.lock().alloc_pages(pages, bytes)?;
                 // Tag the page as SLAB in buddy metadata.
                 unsafe {
@@ -247,7 +330,8 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
         let os = self.os.expect("not initialized");
         let sc = SizeClass::from_layout(layout).expect("layout exceeds slab");
         let slab_bytes = sc.slab_pages(PAGE_SIZE) * PAGE_SIZE;
-        let base = SlabPageHeader::base_from_obj_addr(ptr.as_ptr() as usize, slab_bytes);
+        let base =
+            SlabPageHeader::base_from_obj_addr::<PAGE_SIZE>(ptr.as_ptr() as usize, slab_bytes);
         let hdr = &*(base as *const SlabPageHeader);
         debug_assert_eq!(hdr.magic, SLAB_MAGIC);
 

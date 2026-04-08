@@ -39,83 +39,73 @@ fn host_dealloc(ptr: *mut u8, layout: Layout) {
 
 fn init_allocator(
     allocator: &GlobalAllocator<PAGE_SIZE>,
-    heap_addr: usize,
-    heap_size: usize,
-) -> (*mut u8, Layout) {
-    let meta_size = GlobalAllocator::<PAGE_SIZE>::required_metadata_size(heap_size, 1);
-    let meta_align = GlobalAllocator::<PAGE_SIZE>::required_metadata_align().max(8);
-    let (meta_ptr, meta_layout) = host_alloc(meta_size, meta_align);
-    unsafe {
-        allocator
-            .init(meta_ptr, meta_size, heap_addr, heap_size, 1, &MOCK_OS)
-            .unwrap();
-    }
-    (meta_ptr, meta_layout)
+    region_addr: usize,
+    region_size: usize,
+) {
+    unsafe { allocator.init(region_addr, region_size, 1, &MOCK_OS).unwrap() };
 }
 
 #[test]
 fn test_lowmem_basic() {
-    let (heap_ptr, heap_layout) = host_alloc(TEST_HEAP_SIZE, PAGE_SIZE);
-    let heap_addr = heap_ptr as usize;
+    let (region_ptr, region_layout) = host_alloc(TEST_HEAP_SIZE, PAGE_SIZE);
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    let (meta_ptr, meta_layout) = init_allocator(&allocator, heap_addr, TEST_HEAP_SIZE);
+    init_allocator(&allocator, region_ptr as usize, TEST_HEAP_SIZE);
+    let managed_start = allocator.managed_heap_start();
+    let managed_end = managed_start + allocator.managed_heap_size();
 
     let addr1 = allocator.alloc_pages_lowmem(1, PAGE_SIZE).unwrap();
     let addr2 = allocator.alloc_pages_lowmem(4, PAGE_SIZE).unwrap();
 
-    assert!(addr1 >= heap_addr && addr1 < heap_addr + TEST_HEAP_SIZE);
-    assert!(addr2 >= heap_addr && addr2 < heap_addr + TEST_HEAP_SIZE);
+    assert!(addr1 >= managed_start && addr1 < managed_end);
+    assert!(addr2 >= managed_start && addr2 < managed_end);
     assert_eq!(addr1 % PAGE_SIZE, 0);
     assert_eq!(addr2 % PAGE_SIZE, 0);
 
     allocator.dealloc_pages(addr1, 1);
     allocator.dealloc_pages(addr2, 4);
 
-    host_dealloc(meta_ptr, meta_layout);
-    host_dealloc(heap_ptr, heap_layout);
+    host_dealloc(region_ptr, region_layout);
 }
 
 #[test]
 fn test_lowmem_aligned() {
-    let (heap_ptr, heap_layout) = host_alloc(TEST_HEAP_SIZE, PAGE_SIZE * 2);
-    let heap_addr = heap_ptr as usize;
+    let (region_ptr, region_layout) = host_alloc(TEST_HEAP_SIZE, PAGE_SIZE * 2);
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    let (meta_ptr, meta_layout) = init_allocator(&allocator, heap_addr, TEST_HEAP_SIZE);
+    init_allocator(&allocator, region_ptr as usize, TEST_HEAP_SIZE);
 
     let addr = allocator.alloc_pages_lowmem(1, 2 * PAGE_SIZE).unwrap();
-    assert_eq!(addr % (2 * PAGE_SIZE), 0);
+    assert_eq!(
+        (addr - allocator.managed_heap_start()) % (2 * PAGE_SIZE),
+        0
+    );
     allocator.dealloc_pages(addr, 1);
 
-    host_dealloc(meta_ptr, meta_layout);
-    host_dealloc(heap_ptr, heap_layout);
+    host_dealloc(region_ptr, region_layout);
 }
 
 #[test]
 fn test_lowmem_vs_normal() {
-    let (heap_ptr, heap_layout) = host_alloc(TEST_HEAP_SIZE, PAGE_SIZE);
-    let heap_addr = heap_ptr as usize;
+    let (region_ptr, region_layout) = host_alloc(TEST_HEAP_SIZE, PAGE_SIZE);
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    let (meta_ptr, meta_layout) = init_allocator(&allocator, heap_addr, TEST_HEAP_SIZE);
+    init_allocator(&allocator, region_ptr as usize, TEST_HEAP_SIZE);
 
     let addr_low = allocator.alloc_pages_lowmem(1, PAGE_SIZE).unwrap();
     let addr_normal = allocator.alloc_pages(1, PAGE_SIZE).unwrap();
 
-    assert!(addr_low >= heap_addr);
-    assert!(addr_normal >= heap_addr);
+    assert!(addr_low >= allocator.managed_heap_start());
+    assert!(addr_normal >= allocator.managed_heap_start());
 
     allocator.dealloc_pages(addr_low, 1);
     allocator.dealloc_pages(addr_normal, 1);
 
-    host_dealloc(meta_ptr, meta_layout);
-    host_dealloc(heap_ptr, heap_layout);
+    host_dealloc(region_ptr, region_layout);
 }
 
 #[test]
 fn test_lowmem_stress() {
-    let (heap_ptr, heap_layout) = host_alloc(TEST_HEAP_SIZE, PAGE_SIZE);
-    let heap_addr = heap_ptr as usize;
+    let (region_ptr, region_layout) = host_alloc(TEST_HEAP_SIZE, PAGE_SIZE);
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    let (meta_ptr, meta_layout) = init_allocator(&allocator, heap_addr, TEST_HEAP_SIZE);
+    init_allocator(&allocator, region_ptr as usize, TEST_HEAP_SIZE);
 
     let mut addrs = Vec::new();
     for _ in 0..32 {
@@ -126,6 +116,5 @@ fn test_lowmem_stress() {
         allocator.dealloc_pages(addr, 1);
     }
 
-    host_dealloc(meta_ptr, meta_layout);
-    host_dealloc(heap_ptr, heap_layout);
+    host_dealloc(region_ptr, region_layout);
 }

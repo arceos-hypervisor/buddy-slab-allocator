@@ -1,15 +1,20 @@
 # Benchmark 使用说明
 
-本目录包含 buddy-slab-allocator 的性能 benchmark，统一基于 `criterion`。
+本目录包含基于 `divan` 的 benchmark 套件，围绕当前 crate 的三层结构组织：
 
-## 当前 benchmark 套件
-
-- `global_allocator.rs`
-  多核 `GlobalAllocator` 的混合 workload
 - `buddy_allocator.rs`
-  Buddy 页分配、对齐、碎片化恢复、统计查询
+  `BuddyAllocator` 的页分配、对齐分配、碎片恢复、随机页 workload
 - `slab_allocator.rs`
-  Slab 前端 size class、steady-state、热路径复用
+  `SlabAllocator` 的 size class alloc/free、hot reuse、mixed-size batch、steady-state recycle
+- `global_allocator.rs`
+  `GlobalAllocator` 的小对象、大对象、页接口、混合 workload、cross-CPU free cycle
+
+共享的 host-side harness 放在 `common.rs`，负责：
+
+- region / metadata 分配
+- buddy / slab / global 初始化
+- 固定随机种子
+- mock `OsImpl`
 
 ## 运行方式
 
@@ -28,15 +33,13 @@ cargo bench --bench global_allocator
 
 ## 设计原则
 
-- 使用 `std::hint::black_box`
-- 统一 `criterion` 配置
-- 尽量 benchmark 成对的 alloc/free
-- 固定 workload 批次与随机种子
-- 使用 `Throughput::{Elements, Bytes}` 表达吞吐量
+- 使用 `divan::Bencher` 和 `divan::black_box`
+- 不再保留旧的 `criterion` 代码路径
+- benchmark 只使用当前公开 API，不依赖历史类型名
+- 尽量让每次迭代在闭环内恢复 allocator 状态，减少跨迭代污染
+- workload 使用固定模式或固定随机种子，便于复现
 
-## 与压力测试的区别
+## CI 策略
 
-- `benches/`
-  只做性能测量
-- `tests/stress_test.rs`
-  负责长时间随机、碎片化恢复、耗尽恢复与 tracking 不变量
+CI 仅执行 `cargo check --benches`，确保 benchmark 工程持续可编译。
+真实性能测量和结果对比保留在本地执行。

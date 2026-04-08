@@ -24,30 +24,33 @@ buddy-slab-allocator = { version = "0.1.0", features = ["tracking"] }
 ### 使用 `GlobalAllocator`
 
 ```rust
-use buddy_slab_allocator::{GlobalAllocator, Os};
+use buddy_slab_allocator::{GlobalAllocator, OsImpl};
 use core::alloc::Layout;
 
 const PAGE_SIZE: usize = 0x1000;
 
 struct DemoOs;
-impl Os for DemoOs {
+impl OsImpl for DemoOs {
     fn current_cpu_idx(&self) -> usize {
         0
+    }
+    fn virt_to_phys(&self, vaddr: usize) -> usize {
+        vaddr
+    }
+    fn phys_to_virt(&self, paddr: usize) -> usize {
+        paddr
     }
 }
 
 static OS: DemoOs = DemoOs;
 
-let mut allocator = GlobalAllocator::<PAGE_SIZE>::new();
-
-let meta_start = 0x8100_0000;
-let meta_size = GlobalAllocator::<PAGE_SIZE>::required_metadata_size(1);
-let heap_start = 0x8000_0000;
-let heap_size = 16 * 1024 * 1024;
+let allocator = GlobalAllocator::<PAGE_SIZE>::new();
+let region_start = 0x8000_0000;
+let region_size = 16 * 1024 * 1024;
 
 unsafe {
     allocator
-        .init(meta_start, meta_size, heap_start, heap_size, 1, &OS)
+        .init(region_start, region_size, 1, &OS)
         .unwrap();
 }
 
@@ -109,6 +112,9 @@ cargo test --features tracking
 ```bash
 cargo check --benches
 cargo bench
+cargo bench --bench buddy_allocator
+cargo bench --bench slab_allocator
+cargo bench --bench global_allocator
 ```
 
-Benchmark 说明见 `benches/README_CN.md`。
+Benchmark 基于 `divan`，说明见 `benches/README_CN.md`。
