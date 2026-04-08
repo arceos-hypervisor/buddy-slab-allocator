@@ -1,531 +1,502 @@
-//! Integration tests for the allocator crate.
+//! Integration tests for the buddy-slab-allocator crate.
 
-#![no_std]
-
-extern crate alloc;
 extern crate buddy_slab_allocator;
 
-use alloc::vec::Vec;
 use buddy_slab_allocator::{
-    AllocError, CompositePageAllocator, GlobalAllocator, Os, SlabAllocDecision, SlabByteAllocator,
-    SlabDeallocDecision,
+    BuddyAllocator, GlobalAllocator, OsImpl, SizeClass, SlabAllocResult, SlabAllocator,
+    SlabDeallocResult,
 };
 use core::alloc::Layout;
 use core::sync::atomic::{AtomicUsize, Ordering};
+use std::alloc::{alloc, dealloc};
 
 const PAGE_SIZE: usize = 0x1000;
-const TEST_HEAP_SIZE: usize = 16 * 1024 * 1024;
+const TEST_HEAP_SIZE: usize = 16 * 1024 * 1024; // 16 MiB
 
-struct MockOs {
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+struct TestOs {
     cpu: AtomicUsize,
 }
 
-impl MockOs {
+impl TestOs {
     const fn new() -> Self {
         Self {
             cpu: AtomicUsize::new(0),
         }
     }
 
+    #[allow(dead_code)]
     fn set_cpu(&self, cpu: usize) {
         self.cpu.store(cpu, Ordering::Relaxed);
     }
 }
 
-impl Os for MockOs {
+impl OsImpl for TestOs {
     fn current_cpu_idx(&self) -> usize {
         self.cpu.load(Ordering::Relaxed)
     }
-}
-
-struct FixedOs;
-
-impl Os for FixedOs {
-    fn current_cpu_idx(&self) -> usize {
-        0
+    fn virt_to_phys(&self, vaddr: usize) -> usize {
+        vaddr // identity mapping
+    }
+    fn phys_to_virt(&self, paddr: usize) -> usize {
+        paddr
     }
 }
 
-static FIXED_OS: FixedOs = FixedOs;
-static SWITCHING_OS: MockOs = MockOs::new();
+static TEST_OS: TestOs = TestOs::new();
 
-fn alloc_region(size: usize, align: usize) -> (*mut u8, Layout) {
+/// Allocate a region from the host allocator.
+fn host_alloc(size: usize, align: usize) -> (*mut u8, Layout) {
     let layout = Layout::from_size_align(size, align).unwrap();
-    let ptr = unsafe { alloc::alloc::alloc(layout) };
-    assert!(!ptr.is_null(), "Failed to allocate test region");
+    let ptr = unsafe { alloc(layout) };
+    assert!(!ptr.is_null(), "host alloc failed");
     (ptr, layout)
 }
 
-fn dealloc_region(ptr: *mut u8, layout: Layout) {
-    unsafe { alloc::alloc::dealloc(ptr, layout) };
+fn host_dealloc(ptr: *mut u8, layout: Layout) {
+    unsafe { dealloc(ptr, layout) };
 }
 
-fn alloc_test_heap(size: usize) -> (*mut u8, Layout) {
-    alloc_region(size, PAGE_SIZE)
-}
+// ======================================================================
+// Buddy allocator (standalone) tests
+// ======================================================================
 
-fn alloc_metadata(cpu_count: usize) -> (*mut u8, Layout) {
-    alloc_region(
-        GlobalAllocator::<PAGE_SIZE>::required_metadata_size(cpu_count),
-        PAGE_SIZE,
-    )
-}
+#[test]
+fn buddy_basic_alloc_dealloc() {
+    let (heap_ptr, heap_layout) = host_alloc(TEST_HEAP_SIZE, PAGE_SIZE);
+    let heap_addr = heap_ptr as usize;
+    let meta_size = BuddyAllocator::<PAGE_SIZE>::required_meta_size(TEST_HEAP_SIZE);
+    let (meta_ptr, meta_layout) = host_alloc(meta_size, 16);
 
-fn init_global_allocator(
-    allocator: &mut GlobalAllocator<PAGE_SIZE>,
-    heap_addr: usize,
-    heap_size: usize,
-    cpu_count: usize,
-) -> (*mut u8, Layout) {
-    let (meta_ptr, meta_layout) = alloc_metadata(cpu_count);
+    let mut buddy = BuddyAllocator::<PAGE_SIZE>::new();
     unsafe {
-        allocator
-            .init(
-                meta_ptr as usize,
-                meta_layout.size(),
-                heap_addr,
-                heap_size,
-                cpu_count,
-                &FIXED_OS,
-            )
+        buddy
+            .init(meta_ptr, meta_size, heap_addr, TEST_HEAP_SIZE, None)
             .unwrap();
     }
-    (meta_ptr, meta_layout)
+
+    let addr1 = buddy.alloc_pages(1, PAGE_SIZE).unwrap();
+    assert!(addr1 >= heap_addr && addr1 < heap_addr + TEST_HEAP_SIZE);
+    assert_eq!(addr1 % PAGE_SIZE, 0);
+
+    let addr4 = buddy.alloc_pages(4, PAGE_SIZE).unwrap();
+    assert_eq!(addr4 % PAGE_SIZE, 0);
+
+    let free_before = buddy.free_pages();
+    buddy.dealloc_pages(addr1, 1);
+    buddy.dealloc_pages(addr4, 4);
+    assert!(buddy.free_pages() > free_before);
+
+    host_dealloc(meta_ptr, meta_layout);
+    host_dealloc(heap_ptr, heap_layout);
 }
 
-fn init_global_allocator_with_os(
-    allocator: &mut GlobalAllocator<PAGE_SIZE>,
-    heap_addr: usize,
-    heap_size: usize,
-    cpu_count: usize,
-    os: &'static dyn Os,
-) -> (*mut u8, Layout) {
-    let (meta_ptr, meta_layout) = alloc_metadata(cpu_count);
+#[test]
+fn buddy_alignment() {
+    // Heap must be aligned to the highest alignment we test (PAGE_SIZE * 4)
+    // so that PFN-based alignment maps to absolute address alignment.
+    let (heap_ptr, heap_layout) = host_alloc(TEST_HEAP_SIZE, PAGE_SIZE * 4);
+    let heap_addr = heap_ptr as usize;
+    let meta_size = BuddyAllocator::<PAGE_SIZE>::required_meta_size(TEST_HEAP_SIZE);
+    let (meta_ptr, meta_layout) = host_alloc(meta_size, 16);
+
+    let mut buddy = BuddyAllocator::<PAGE_SIZE>::new();
     unsafe {
-        allocator
-            .init(
-                meta_ptr as usize,
-                meta_layout.size(),
-                heap_addr,
-                heap_size,
-                cpu_count,
-                os,
-            )
+        buddy
+            .init(meta_ptr, meta_size, heap_addr, TEST_HEAP_SIZE, None)
             .unwrap();
     }
-    (meta_ptr, meta_layout)
+
+    let addr2 = buddy.alloc_pages(1, PAGE_SIZE * 2).unwrap();
+    assert_eq!(addr2 % (PAGE_SIZE * 2), 0);
+
+    let addr4 = buddy.alloc_pages(1, PAGE_SIZE * 4).unwrap();
+    assert_eq!(addr4 % (PAGE_SIZE * 4), 0);
+
+    buddy.dealloc_pages(addr2, 1);
+    buddy.dealloc_pages(addr4, 1);
+
+    host_dealloc(meta_ptr, meta_layout);
+    host_dealloc(heap_ptr, heap_layout);
 }
 
-fn slab_alloc_with_refill(
-    slab_allocator: &mut SlabByteAllocator<PAGE_SIZE>,
-    page_allocator: &mut CompositePageAllocator<PAGE_SIZE>,
-    owner_cpu: usize,
-    layout: Layout,
-) -> core::ptr::NonNull<u8> {
-    loop {
-        match slab_allocator.alloc(layout).unwrap() {
-            SlabAllocDecision::Allocated(ptr, _) => return ptr,
-            SlabAllocDecision::NeedsRefill {
-                size_class,
-                page_count,
-                slab_bytes,
-            } => {
-                let slab_base = page_allocator.alloc_pages(page_count, slab_bytes).unwrap();
-                slab_allocator
-                    .provide_slab(size_class, owner_cpu, slab_base, slab_bytes)
-                    .unwrap();
+#[test]
+fn buddy_exhaust_and_recover() {
+    let heap_size = 64 * PAGE_SIZE; // Small heap
+    let (heap_ptr, heap_layout) = host_alloc(heap_size, PAGE_SIZE);
+    let heap_addr = heap_ptr as usize;
+    let meta_size = BuddyAllocator::<PAGE_SIZE>::required_meta_size(heap_size);
+    let (meta_ptr, meta_layout) = host_alloc(meta_size, 16);
+
+    let mut buddy = BuddyAllocator::<PAGE_SIZE>::new();
+    unsafe {
+        buddy
+            .init(meta_ptr, meta_size, heap_addr, heap_size, None)
+            .unwrap();
+    }
+
+    let mut addrs = Vec::new();
+    while let Ok(addr) = buddy.alloc_pages(1, PAGE_SIZE) {
+        addrs.push(addr);
+    }
+    assert_eq!(buddy.free_pages(), 0);
+
+    // Free half
+    for addr in addrs.drain(..addrs.len() / 2) {
+        buddy.dealloc_pages(addr, 1);
+    }
+    assert!(buddy.free_pages() > 0);
+
+    // Allocate again
+    let addr = buddy.alloc_pages(1, PAGE_SIZE);
+    assert!(addr.is_ok());
+
+    // Cleanup
+    if let Ok(a) = addr {
+        buddy.dealloc_pages(a, 1);
+    }
+    for a in addrs {
+        buddy.dealloc_pages(a, 1);
+    }
+
+    host_dealloc(meta_ptr, meta_layout);
+    host_dealloc(heap_ptr, heap_layout);
+}
+
+#[test]
+fn buddy_merge_coalescing() {
+    let heap_size = 16 * PAGE_SIZE;
+    let (heap_ptr, heap_layout) = host_alloc(heap_size, PAGE_SIZE);
+    let heap_addr = heap_ptr as usize;
+    let meta_size = BuddyAllocator::<PAGE_SIZE>::required_meta_size(heap_size);
+    let (meta_ptr, meta_layout) = host_alloc(meta_size, 16);
+
+    let mut buddy = BuddyAllocator::<PAGE_SIZE>::new();
+    unsafe {
+        buddy
+            .init(meta_ptr, meta_size, heap_addr, heap_size, None)
+            .unwrap();
+    }
+
+    let initial_free = buddy.free_pages();
+
+    // Allocate two single pages
+    let a = buddy.alloc_pages(1, PAGE_SIZE).unwrap();
+    let b = buddy.alloc_pages(1, PAGE_SIZE).unwrap();
+    buddy.dealloc_pages(a, 1);
+    buddy.dealloc_pages(b, 1);
+
+    // After freeing both, free_pages should return to initial
+    assert_eq!(buddy.free_pages(), initial_free);
+
+    host_dealloc(meta_ptr, meta_layout);
+    host_dealloc(heap_ptr, heap_layout);
+}
+
+// ======================================================================
+// Slab allocator (standalone) tests
+// ======================================================================
+
+#[test]
+fn slab_basic() {
+    let (heap_ptr, heap_layout) = host_alloc(TEST_HEAP_SIZE, PAGE_SIZE);
+    let heap_addr = heap_ptr as usize;
+    let meta_size = BuddyAllocator::<PAGE_SIZE>::required_meta_size(TEST_HEAP_SIZE);
+    let (meta_ptr, meta_layout) = host_alloc(meta_size, 16);
+
+    let mut buddy = BuddyAllocator::<PAGE_SIZE>::new();
+    unsafe {
+        buddy
+            .init(meta_ptr, meta_size, heap_addr, TEST_HEAP_SIZE, None)
+            .unwrap();
+    }
+
+    let mut slab = SlabAllocator::<PAGE_SIZE>::new();
+
+    let layout = Layout::from_size_align(64, 8).unwrap();
+    // First alloc should request pages
+    match slab.alloc(layout).unwrap() {
+        SlabAllocResult::NeedsSlab { size_class, pages } => {
+            let addr = buddy.alloc_pages(pages, PAGE_SIZE).unwrap();
+            slab.add_slab(size_class, addr, pages * PAGE_SIZE, 0);
+        }
+        SlabAllocResult::Allocated(_) => panic!("should need slab first"),
+    }
+
+    // Now allocation should succeed
+    let ptr = match slab.alloc(layout).unwrap() {
+        SlabAllocResult::Allocated(p) => p,
+        _ => panic!("expected allocated"),
+    };
+
+    // Dealloc
+    match slab.dealloc(ptr, layout) {
+        SlabDeallocResult::Done => {}
+        SlabDeallocResult::FreeSlab { .. } => {} // also valid
+    }
+
+    host_dealloc(meta_ptr, meta_layout);
+    host_dealloc(heap_ptr, heap_layout);
+}
+
+#[test]
+fn slab_many_objects() {
+    let (heap_ptr, heap_layout) = host_alloc(TEST_HEAP_SIZE, PAGE_SIZE * 4);
+    let heap_addr = heap_ptr as usize;
+    let meta_size = BuddyAllocator::<PAGE_SIZE>::required_meta_size(TEST_HEAP_SIZE);
+    let (meta_ptr, meta_layout) = host_alloc(meta_size, 16);
+
+    let mut buddy = BuddyAllocator::<PAGE_SIZE>::new();
+    unsafe {
+        buddy
+            .init(meta_ptr, meta_size, heap_addr, TEST_HEAP_SIZE, None)
+            .unwrap();
+    }
+
+    let mut slab = SlabAllocator::<PAGE_SIZE>::new();
+    let layout = Layout::from_size_align(32, 8).unwrap();
+
+    let mut ptrs = Vec::new();
+    for _ in 0..200 {
+        loop {
+            match slab.alloc(layout).unwrap() {
+                SlabAllocResult::Allocated(p) => {
+                    ptrs.push(p);
+                    break;
+                }
+                SlabAllocResult::NeedsSlab { size_class, pages } => {
+                    let slab_bytes = pages * PAGE_SIZE;
+                    let addr = buddy.alloc_pages(pages, slab_bytes).unwrap();
+                    slab.add_slab(size_class, addr, slab_bytes, 0);
+                }
             }
         }
     }
-}
 
-fn slab_dealloc_with_release(
-    slab_allocator: &mut SlabByteAllocator<PAGE_SIZE>,
-    page_allocator: &mut CompositePageAllocator<PAGE_SIZE>,
-    ptr: core::ptr::NonNull<u8>,
-    layout: Layout,
-) {
-    if let SlabDeallocDecision::ReleaseSlab {
-        slab_base,
-        page_count,
-        ..
-    } = slab_allocator.dealloc(ptr, layout)
-    {
-        page_allocator.dealloc_pages(slab_base, page_count);
-    }
-}
-
-#[test]
-fn test_composite_page_allocator_basic() {
-    let (heap_ptr, heap_layout) = alloc_test_heap(TEST_HEAP_SIZE);
-    let heap_addr = heap_ptr as usize;
-
-    let mut allocator = CompositePageAllocator::<PAGE_SIZE>::new();
-    allocator.init(heap_addr, TEST_HEAP_SIZE);
-
-    let addr1 = allocator.alloc_pages(1, PAGE_SIZE).unwrap();
-    let addr2 = allocator.alloc_pages(4, PAGE_SIZE).unwrap();
-
-    assert!(addr1 >= heap_addr && addr1 < heap_addr + TEST_HEAP_SIZE);
-    assert!(addr2 >= heap_addr && addr2 < heap_addr + TEST_HEAP_SIZE);
-
-    allocator.dealloc_pages(addr1, 1);
-    allocator.dealloc_pages(addr2, 4);
-
-    dealloc_region(heap_ptr, heap_layout);
-}
-
-#[test]
-fn test_composite_page_allocator_alignment() {
-    let (heap_ptr, heap_layout) = alloc_test_heap(TEST_HEAP_SIZE);
-    let heap_addr = heap_ptr as usize;
-
-    let mut allocator = CompositePageAllocator::<PAGE_SIZE>::new();
-    allocator.init(heap_addr, TEST_HEAP_SIZE);
-
-    let addr1 = allocator.alloc_pages(1, PAGE_SIZE).unwrap();
-    let addr2 = allocator.alloc_pages(1, PAGE_SIZE * 2).unwrap();
-    let addr3 = allocator.alloc_pages(1, PAGE_SIZE * 4).unwrap();
-
-    assert_eq!(addr1 & (PAGE_SIZE - 1), 0);
-    assert_eq!(addr2 & (PAGE_SIZE * 2 - 1), 0);
-    assert_eq!(addr3 & (PAGE_SIZE * 4 - 1), 0);
-
-    allocator.dealloc_pages(addr1, 1);
-    allocator.dealloc_pages(addr2, 1);
-    allocator.dealloc_pages(addr3, 1);
-
-    dealloc_region(heap_ptr, heap_layout);
-}
-
-#[test]
-fn test_composite_page_allocator_fragmentation() {
-    let (heap_ptr, heap_layout) = alloc_test_heap(TEST_HEAP_SIZE);
-    let heap_addr = heap_ptr as usize;
-
-    let mut allocator = CompositePageAllocator::<PAGE_SIZE>::new();
-    allocator.init(heap_addr, TEST_HEAP_SIZE);
-
-    let mut addrs = Vec::new();
-    for _ in 0..10 {
-        let addr = allocator.alloc_pages(1, PAGE_SIZE).unwrap();
-        addrs.push((addr, 1));
-    }
-
-    for i in (0..addrs.len()).step_by(2) {
-        allocator.dealloc_pages(addrs[i].0, addrs[i].1);
-    }
-
-    let result = allocator.alloc_pages(5, PAGE_SIZE);
-    assert!(result.is_ok());
-
-    for i in (1..addrs.len()).step_by(2) {
-        allocator.dealloc_pages(addrs[i].0, addrs[i].1);
-    }
-    if let Ok(addr) = result {
-        allocator.dealloc_pages(addr, 5);
-    }
-
-    dealloc_region(heap_ptr, heap_layout);
-}
-
-#[test]
-fn test_slab_allocator_basic() {
-    let (heap_ptr, heap_layout) = alloc_test_heap(TEST_HEAP_SIZE);
-    let heap_addr = heap_ptr as usize;
-
-    let mut page_allocator = CompositePageAllocator::<PAGE_SIZE>::new();
-    page_allocator.init(heap_addr, TEST_HEAP_SIZE);
-
-    let mut slab_allocator = SlabByteAllocator::<PAGE_SIZE>::new();
-
-    let layout8 = Layout::from_size_align(8, 8).unwrap();
-    let ptr8 = slab_alloc_with_refill(&mut slab_allocator, &mut page_allocator, 0, layout8);
-
-    let layout64 = Layout::from_size_align(64, 8).unwrap();
-    let ptr64 = slab_alloc_with_refill(&mut slab_allocator, &mut page_allocator, 0, layout64);
-
-    let layout2048 = Layout::from_size_align(2048, 8).unwrap();
-    let ptr2048 = slab_alloc_with_refill(&mut slab_allocator, &mut page_allocator, 0, layout2048);
-
-    slab_dealloc_with_release(&mut slab_allocator, &mut page_allocator, ptr8, layout8);
-    slab_dealloc_with_release(&mut slab_allocator, &mut page_allocator, ptr64, layout64);
-    slab_dealloc_with_release(
-        &mut slab_allocator,
-        &mut page_allocator,
-        ptr2048,
-        layout2048,
-    );
-
-    dealloc_region(heap_ptr, heap_layout);
-}
-
-#[test]
-fn test_slab_allocator_many_objects() {
-    let (heap_ptr, heap_layout) = alloc_test_heap(TEST_HEAP_SIZE);
-    let heap_addr = heap_ptr as usize;
-
-    let mut page_allocator = CompositePageAllocator::<PAGE_SIZE>::new();
-    page_allocator.init(heap_addr, TEST_HEAP_SIZE);
-    let mut slab_allocator = SlabByteAllocator::<PAGE_SIZE>::new();
-
-    let mut ptrs = Vec::new();
-    let layout = Layout::from_size_align(32, 8).unwrap();
-
-    for _ in 0..100 {
-        let ptr = slab_alloc_with_refill(&mut slab_allocator, &mut page_allocator, 0, layout);
-        ptrs.push(ptr);
-    }
-
-    assert_eq!(ptrs.len(), 100);
-
+    assert_eq!(ptrs.len(), 200);
     for ptr in ptrs {
-        slab_dealloc_with_release(&mut slab_allocator, &mut page_allocator, ptr, layout);
+        let _ = slab.dealloc(ptr, layout);
     }
 
-    dealloc_region(heap_ptr, heap_layout);
+    host_dealloc(meta_ptr, meta_layout);
+    host_dealloc(heap_ptr, heap_layout);
 }
 
 #[test]
-fn test_global_allocator_init() {
-    let (heap_ptr, heap_layout) = alloc_test_heap(TEST_HEAP_SIZE);
+fn slab_all_size_classes() {
+    let (heap_ptr, heap_layout) = host_alloc(TEST_HEAP_SIZE, PAGE_SIZE * 4);
     let heap_addr = heap_ptr as usize;
+    let meta_size = BuddyAllocator::<PAGE_SIZE>::required_meta_size(TEST_HEAP_SIZE);
+    let (meta_ptr, meta_layout) = host_alloc(meta_size, 16);
 
-    let mut allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    let (meta_ptr, meta_layout) =
-        init_global_allocator(&mut allocator, heap_addr, TEST_HEAP_SIZE, 1);
+    let mut buddy = BuddyAllocator::<PAGE_SIZE>::new();
+    unsafe {
+        buddy
+            .init(meta_ptr, meta_size, heap_addr, TEST_HEAP_SIZE, None)
+            .unwrap();
+    }
 
-    let addr = allocator.alloc_pages(1, PAGE_SIZE).unwrap();
-    allocator.dealloc_pages(addr, 1);
+    let mut slab = SlabAllocator::<PAGE_SIZE>::new();
+    let mut allocations = Vec::new();
 
-    dealloc_region(meta_ptr, meta_layout);
-    dealloc_region(heap_ptr, heap_layout);
+    for sc in SizeClass::ALL {
+        let layout = Layout::from_size_align(sc.size(), sc.size()).unwrap();
+        loop {
+            match slab.alloc(layout).unwrap() {
+                SlabAllocResult::Allocated(p) => {
+                    allocations.push((p, layout));
+                    break;
+                }
+                SlabAllocResult::NeedsSlab { size_class, pages } => {
+                    let slab_bytes = pages * PAGE_SIZE;
+                    let addr = buddy.alloc_pages(pages, slab_bytes).unwrap();
+                    slab.add_slab(size_class, addr, slab_bytes, 0);
+                }
+            }
+        }
+    }
+
+    assert_eq!(allocations.len(), SizeClass::COUNT);
+    for (ptr, layout) in allocations {
+        let _ = slab.dealloc(ptr, layout);
+    }
+
+    host_dealloc(meta_ptr, meta_layout);
+    host_dealloc(heap_ptr, heap_layout);
+}
+
+// ======================================================================
+// Global allocator tests
+// ======================================================================
+
+fn init_global(
+    allocator: &GlobalAllocator<PAGE_SIZE>,
+    heap_addr: usize,
+    heap_size: usize,
+    cpu_count: usize,
+) -> (*mut u8, Layout) {
+    let meta_size = GlobalAllocator::<PAGE_SIZE>::required_metadata_size(heap_size, cpu_count);
+    let meta_align = GlobalAllocator::<PAGE_SIZE>::required_metadata_align();
+    let (meta_ptr, meta_layout) = host_alloc(meta_size, meta_align.max(8));
+    unsafe {
+        allocator
+            .init(
+                meta_ptr, meta_size, heap_addr, heap_size, cpu_count, &TEST_OS,
+            )
+            .unwrap();
+    }
+    (meta_ptr, meta_layout)
 }
 
 #[test]
-fn test_global_allocator_small_alloc() {
-    let (heap_ptr, heap_layout) = alloc_test_heap(TEST_HEAP_SIZE);
+fn global_page_alloc() {
+    let (heap_ptr, heap_layout) = host_alloc(TEST_HEAP_SIZE, PAGE_SIZE * 4);
     let heap_addr = heap_ptr as usize;
+    let allocator = GlobalAllocator::<PAGE_SIZE>::new();
+    let (meta_ptr, meta_layout) = init_global(&allocator, heap_addr, TEST_HEAP_SIZE, 1);
 
-    let mut allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    let (meta_ptr, meta_layout) =
-        init_global_allocator(&mut allocator, heap_addr, TEST_HEAP_SIZE, 1);
+    let addr = allocator.alloc_pages(4, PAGE_SIZE).unwrap();
+    assert!(addr >= heap_addr && addr < heap_addr + TEST_HEAP_SIZE);
+    assert_eq!(addr % PAGE_SIZE, 0);
+    allocator.dealloc_pages(addr, 4);
+
+    host_dealloc(meta_ptr, meta_layout);
+    host_dealloc(heap_ptr, heap_layout);
+}
+
+#[test]
+fn global_small_alloc() {
+    let (heap_ptr, heap_layout) = host_alloc(TEST_HEAP_SIZE, PAGE_SIZE * 4);
+    let heap_addr = heap_ptr as usize;
+    let allocator = GlobalAllocator::<PAGE_SIZE>::new();
+    let (meta_ptr, meta_layout) = init_global(&allocator, heap_addr, TEST_HEAP_SIZE, 1);
 
     let layout = Layout::from_size_align(64, 8).unwrap();
     let ptr = allocator.alloc(layout).unwrap();
-    allocator.dealloc(ptr, layout);
+    unsafe { allocator.dealloc(ptr, layout) };
 
-    dealloc_region(meta_ptr, meta_layout);
-    dealloc_region(heap_ptr, heap_layout);
+    host_dealloc(meta_ptr, meta_layout);
+    host_dealloc(heap_ptr, heap_layout);
 }
 
 #[test]
-fn test_global_allocator_large_alloc() {
-    let (heap_ptr, heap_layout) = alloc_test_heap(TEST_HEAP_SIZE);
+fn global_large_alloc() {
+    let (heap_ptr, heap_layout) = host_alloc(TEST_HEAP_SIZE, PAGE_SIZE * 4);
     let heap_addr = heap_ptr as usize;
-
-    let mut allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    let (meta_ptr, meta_layout) =
-        init_global_allocator(&mut allocator, heap_addr, TEST_HEAP_SIZE, 1);
+    let allocator = GlobalAllocator::<PAGE_SIZE>::new();
+    let (meta_ptr, meta_layout) = init_global(&allocator, heap_addr, TEST_HEAP_SIZE, 1);
 
     let layout = Layout::from_size_align(8192, PAGE_SIZE).unwrap();
     let ptr = allocator.alloc(layout).unwrap();
-    allocator.dealloc(ptr, layout);
+    unsafe { allocator.dealloc(ptr, layout) };
 
-    dealloc_region(meta_ptr, meta_layout);
-    dealloc_region(heap_ptr, heap_layout);
+    host_dealloc(meta_ptr, meta_layout);
+    host_dealloc(heap_ptr, heap_layout);
 }
 
 #[test]
-fn test_global_allocator_mixed_alloc() {
-    let (heap_ptr, heap_layout) = alloc_test_heap(TEST_HEAP_SIZE);
+fn global_mixed_alloc() {
+    let (heap_ptr, heap_layout) = host_alloc(TEST_HEAP_SIZE, PAGE_SIZE * 4);
     let heap_addr = heap_ptr as usize;
+    let allocator = GlobalAllocator::<PAGE_SIZE>::new();
+    let (meta_ptr, meta_layout) = init_global(&allocator, heap_addr, TEST_HEAP_SIZE, 1);
 
-    let mut allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    let (meta_ptr, meta_layout) =
-        init_global_allocator(&mut allocator, heap_addr, TEST_HEAP_SIZE, 1);
-
-    let sizes = [8, 64, 1024, 4096, 8192];
+    let sizes: &[(usize, usize)] = &[
+        (8, 8),
+        (64, 8),
+        (1024, 8),
+        (4096, PAGE_SIZE),
+        (8192, PAGE_SIZE),
+    ];
     let mut allocations = Vec::new();
-
-    for &size in &sizes {
-        let align = if size <= 2048 { 8 } else { PAGE_SIZE };
+    for &(size, align) in sizes {
         let layout = Layout::from_size_align(size, align).unwrap();
         let ptr = allocator.alloc(layout).unwrap();
         allocations.push((ptr, layout));
     }
-
     for (ptr, layout) in allocations {
-        allocator.dealloc(ptr, layout);
+        unsafe { allocator.dealloc(ptr, layout) };
     }
 
-    dealloc_region(meta_ptr, meta_layout);
-    dealloc_region(heap_ptr, heap_layout);
+    host_dealloc(meta_ptr, meta_layout);
+    host_dealloc(heap_ptr, heap_layout);
 }
 
 #[test]
-fn test_global_allocator_page_alloc() {
-    let (heap_ptr, heap_layout) = alloc_test_heap(TEST_HEAP_SIZE);
+fn global_cross_cpu_free() {
+    let (heap_ptr, heap_layout) = host_alloc(TEST_HEAP_SIZE, PAGE_SIZE * 4);
     let heap_addr = heap_ptr as usize;
+    let allocator = GlobalAllocator::<PAGE_SIZE>::new();
+    let (meta_ptr, meta_layout) = init_global(&allocator, heap_addr, TEST_HEAP_SIZE, 2);
 
-    let mut allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    let (meta_ptr, meta_layout) =
-        init_global_allocator(&mut allocator, heap_addr, TEST_HEAP_SIZE, 1);
-
-    let addr1 = allocator.alloc_pages(4, PAGE_SIZE).unwrap();
-    let addr2 = allocator.alloc_pages(8, PAGE_SIZE).unwrap();
-
-    allocator.dealloc_pages(addr1, 4);
-    allocator.dealloc_pages(addr2, 8);
-
-    dealloc_region(meta_ptr, meta_layout);
-    dealloc_region(heap_ptr, heap_layout);
-}
-
-#[test]
-fn test_global_allocator_add_memory() {
-    let (heap_ptr1, heap_layout1) = alloc_test_heap(TEST_HEAP_SIZE);
-    let (heap_ptr2, heap_layout2) = alloc_test_heap(TEST_HEAP_SIZE);
-    let heap_addr1 = heap_ptr1 as usize;
-    let heap_addr2 = heap_ptr2 as usize;
-
-    let mut allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    let (meta_ptr, meta_layout) =
-        init_global_allocator(&mut allocator, heap_addr1, TEST_HEAP_SIZE, 1);
-
-    allocator.add_memory(heap_addr2, TEST_HEAP_SIZE).unwrap();
-    let addr = allocator.alloc_pages(16, PAGE_SIZE).unwrap();
-    allocator.dealloc_pages(addr, 16);
-
-    dealloc_region(meta_ptr, meta_layout);
-    dealloc_region(heap_ptr1, heap_layout1);
-    dealloc_region(heap_ptr2, heap_layout2);
-}
-
-#[test]
-fn test_error_conditions() {
-    let (heap_ptr, heap_layout) = alloc_test_heap(TEST_HEAP_SIZE);
-    let heap_addr = heap_ptr as usize;
-
-    let mut allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    let (meta_ptr, meta_layout) =
-        init_global_allocator(&mut allocator, heap_addr, TEST_HEAP_SIZE, 1);
-
-    assert!(matches!(
-        allocator.alloc_pages(0, PAGE_SIZE),
-        Err(AllocError::InvalidParam)
-    ));
-
-    let huge_pages = TEST_HEAP_SIZE / PAGE_SIZE + 1;
-    assert!(matches!(
-        allocator.alloc_pages(huge_pages, PAGE_SIZE),
-        Err(AllocError::NoMemory)
-    ));
-
-    dealloc_region(meta_ptr, meta_layout);
-    dealloc_region(heap_ptr, heap_layout);
-}
-
-#[cfg(feature = "tracking")]
-#[test]
-fn test_statistics_tracking() {
-    let (heap_ptr, heap_layout) = alloc_test_heap(TEST_HEAP_SIZE);
-    let heap_addr = heap_ptr as usize;
-
-    let mut allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    let (meta_ptr, meta_layout) =
-        init_global_allocator(&mut allocator, heap_addr, TEST_HEAP_SIZE, 1);
-
-    let stats_initial = allocator.get_stats();
-    assert!(stats_initial.total_pages > 0);
-
+    // Allocate on CPU 0
+    TEST_OS.set_cpu(0);
     let layout = Layout::from_size_align(64, 8).unwrap();
-    let _ptr = allocator.alloc(layout).unwrap();
+    let mut ptrs = Vec::new();
+    for _ in 0..10 {
+        ptrs.push(allocator.alloc(layout).unwrap());
+    }
 
-    let stats_after = allocator.get_stats();
-    assert!(stats_after.slab_bytes > 0);
+    // Free from CPU 1 (triggers remote free path)
+    TEST_OS.set_cpu(1);
+    for ptr in ptrs {
+        unsafe { allocator.dealloc(ptr, layout) };
+    }
 
-    dealloc_region(meta_ptr, meta_layout);
-    dealloc_region(heap_ptr, heap_layout);
-}
+    // Allocate on CPU 0 again — should drain remote frees and succeed
+    TEST_OS.set_cpu(0);
+    let ptr = allocator.alloc(layout).unwrap();
+    unsafe { allocator.dealloc(ptr, layout) };
 
-#[cfg(feature = "tracking")]
-#[test]
-fn test_buddy_statistics() {
-    let (heap_ptr, heap_layout) = alloc_test_heap(TEST_HEAP_SIZE);
-    let heap_addr = heap_ptr as usize;
-
-    let mut allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    let (meta_ptr, meta_layout) =
-        init_global_allocator(&mut allocator, heap_addr, TEST_HEAP_SIZE, 1);
-
-    let buddy_stats = allocator.get_buddy_stats();
-    assert!(buddy_stats.total_pages > 0);
-    assert_eq!(buddy_stats.used_pages, 0);
-    assert_eq!(buddy_stats.free_pages, buddy_stats.total_pages);
-
-    dealloc_region(meta_ptr, meta_layout);
-    dealloc_region(heap_ptr, heap_layout);
+    host_dealloc(meta_ptr, meta_layout);
+    host_dealloc(heap_ptr, heap_layout);
 }
 
 #[test]
-fn test_stress_allocation_deallocation() {
-    let (heap_ptr, heap_layout) = alloc_test_heap(TEST_HEAP_SIZE);
-    let heap_addr = heap_ptr as usize;
-
-    let mut allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    let (meta_ptr, meta_layout) = init_global_allocator_with_os(
-        &mut allocator,
-        heap_addr,
-        TEST_HEAP_SIZE,
-        2,
-        &SWITCHING_OS,
-    );
-
-    let mut allocations = Vec::new();
-    for i in 0..100 {
-        SWITCHING_OS.set_cpu(i % 2);
-        let size = if i % 2 == 0 { 64 } else { 4096 };
-        let align = if size <= 2048 { 8 } else { PAGE_SIZE };
-        let layout = Layout::from_size_align(size, align).unwrap();
-        if let Ok(ptr) = allocator.alloc(layout) {
-            allocations.push((ptr, layout));
+fn global_lowmem_pages() {
+    // Use a custom OsImpl that maps virt addresses below 4 GiB so lowmem
+    // allocation can succeed on 64-bit hosts where heap addresses are > 4 GiB.
+    struct LowmemOs;
+    impl OsImpl for LowmemOs {
+        fn current_cpu_idx(&self) -> usize {
+            0
+        }
+        fn virt_to_phys(&self, vaddr: usize) -> usize {
+            vaddr & 0x0FFF_FFFF
+        }
+        fn phys_to_virt(&self, paddr: usize) -> usize {
+            paddr
         }
     }
+    static LOWMEM_OS: LowmemOs = LowmemOs;
 
-    while let Some((ptr, layout)) = allocations.pop() {
-        allocator.dealloc(ptr, layout);
+    let (heap_ptr, heap_layout) = host_alloc(TEST_HEAP_SIZE, PAGE_SIZE * 4);
+    let heap_addr = heap_ptr as usize;
+    let allocator = GlobalAllocator::<PAGE_SIZE>::new();
+    let cpu_count = 1;
+    let meta_size = GlobalAllocator::<PAGE_SIZE>::required_metadata_size(TEST_HEAP_SIZE, cpu_count);
+    let meta_align = GlobalAllocator::<PAGE_SIZE>::required_metadata_align();
+    let (meta_ptr, meta_layout) = host_alloc(meta_size, meta_align.max(8));
+    unsafe {
+        allocator
+            .init(
+                meta_ptr,
+                meta_size,
+                heap_addr,
+                TEST_HEAP_SIZE,
+                cpu_count,
+                &LOWMEM_OS,
+            )
+            .unwrap();
     }
 
-    dealloc_region(meta_ptr, meta_layout);
-    dealloc_region(heap_ptr, heap_layout);
-}
+    let addr = allocator.alloc_pages_lowmem(1, PAGE_SIZE).unwrap();
+    assert!(addr >= heap_addr);
+    allocator.dealloc_pages(addr, 1);
 
-#[test]
-fn test_global_allocator_cross_cpu_free() {
-    let (heap_ptr, heap_layout) = alloc_test_heap(TEST_HEAP_SIZE);
-    let heap_addr = heap_ptr as usize;
-
-    let mut allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    let (meta_ptr, meta_layout) = init_global_allocator_with_os(
-        &mut allocator,
-        heap_addr,
-        TEST_HEAP_SIZE,
-        2,
-        &SWITCHING_OS,
-    );
-
-    let layout = Layout::from_size_align(64, 8).unwrap();
-    SWITCHING_OS.set_cpu(0);
-    let ptr = allocator.alloc(layout).unwrap();
-
-    SWITCHING_OS.set_cpu(1);
-    allocator.dealloc(ptr, layout);
-
-    SWITCHING_OS.set_cpu(0);
-    let ptr2 = allocator.alloc(layout).unwrap();
-    allocator.dealloc(ptr2, layout);
-
-    dealloc_region(meta_ptr, meta_layout);
-    dealloc_region(heap_ptr, heap_layout);
+    host_dealloc(meta_ptr, meta_layout);
+    host_dealloc(heap_ptr, heap_layout);
 }

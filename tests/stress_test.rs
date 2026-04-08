@@ -1,6 +1,6 @@
-//! Ignored stress tests for allocator stability and long-running behavior.
+//! Stress tests for allocator stability.
 
-use buddy_slab_allocator::{GlobalAllocator, Os};
+use buddy_slab_allocator::{GlobalAllocator, OsImpl};
 use rand::{RngExt, SeedableRng};
 use std::alloc::{alloc, dealloc, Layout};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -24,9 +24,15 @@ impl MockOs {
     }
 }
 
-impl Os for MockOs {
+impl OsImpl for MockOs {
     fn current_cpu_idx(&self) -> usize {
         self.cpu.load(Ordering::Relaxed)
+    }
+    fn virt_to_phys(&self, vaddr: usize) -> usize {
+        vaddr
+    }
+    fn phys_to_virt(&self, paddr: usize) -> usize {
+        paddr
     }
 }
 
@@ -56,25 +62,26 @@ impl Drop for TestHeap {
     }
 }
 
-fn alloc_metadata(cpu_count: usize) -> (*mut u8, Layout) {
-    let size = GlobalAllocator::<PAGE_SIZE>::required_metadata_size(cpu_count);
-    let layout = Layout::from_size_align(size, PAGE_SIZE).unwrap();
+fn alloc_metadata(heap_size: usize, cpu_count: usize) -> (*mut u8, Layout) {
+    let size = GlobalAllocator::<PAGE_SIZE>::required_metadata_size(heap_size, cpu_count);
+    let align = GlobalAllocator::<PAGE_SIZE>::required_metadata_align().max(8);
+    let layout = Layout::from_size_align(size, align).unwrap();
     let ptr = unsafe { alloc(layout) };
     assert!(!ptr.is_null(), "failed to allocate metadata");
     (ptr, layout)
 }
 
 fn init_allocator(
-    allocator: &mut GlobalAllocator<PAGE_SIZE>,
+    allocator: &GlobalAllocator<PAGE_SIZE>,
     heap: &TestHeap,
     cpu_count: usize,
 ) -> (*mut u8, Layout) {
-    let (meta_ptr, meta_layout) = alloc_metadata(cpu_count);
+    let (meta_ptr, meta_layout) = alloc_metadata(HEAP_SIZE, cpu_count);
     MOCK_OS.set_cpu(0);
     unsafe {
         allocator
             .init(
-                meta_ptr as usize,
+                meta_ptr,
                 meta_layout.size(),
                 heap.addr(),
                 HEAP_SIZE,
@@ -90,10 +97,10 @@ fn init_allocator(
 #[ignore = "stress test"]
 fn stress_random_mixed_alloc_free() {
     let heap = TestHeap::new(HEAP_SIZE);
-    let mut allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    let (meta_ptr, meta_layout) = init_allocator(&mut allocator, &heap, 2);
+    let allocator = GlobalAllocator::<PAGE_SIZE>::new();
+    let (meta_ptr, meta_layout) = init_allocator(&allocator, &heap, 2);
     let mut rng = rand::rngs::StdRng::from_seed([0; 32]);
-    let mut allocated = Vec::new();
+    let mut allocated: Vec<(core::ptr::NonNull<u8>, Layout)> = Vec::new();
 
     for i in 0..10_000 {
         MOCK_OS.set_cpu(i % 2);
@@ -112,12 +119,12 @@ fn stress_random_mixed_alloc_free() {
         } else {
             let idx = rng.random_range(0..allocated.len());
             let (ptr, layout) = allocated.swap_remove(idx);
-            allocator.dealloc(ptr, layout);
+            unsafe { allocator.dealloc(ptr, layout) };
         }
     }
 
     for (ptr, layout) in allocated {
-        allocator.dealloc(ptr, layout);
+        unsafe { allocator.dealloc(ptr, layout) };
     }
 
     unsafe { dealloc(meta_ptr, meta_layout) };
@@ -127,8 +134,8 @@ fn stress_random_mixed_alloc_free() {
 #[ignore = "stress test"]
 fn stress_exhaustion_recovery() {
     let heap = TestHeap::new(HEAP_SIZE);
-    let mut allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    let (meta_ptr, meta_layout) = init_allocator(&mut allocator, &heap, 2);
+    let allocator = GlobalAllocator::<PAGE_SIZE>::new();
+    let (meta_ptr, meta_layout) = init_allocator(&allocator, &heap, 1);
     let layout = Layout::from_size_align(PAGE_SIZE, PAGE_SIZE).unwrap();
     let mut allocated = Vec::new();
 
@@ -137,18 +144,18 @@ fn stress_exhaustion_recovery() {
     }
 
     for ptr in allocated.drain(..allocated.len() / 4) {
-        allocator.dealloc(ptr, layout);
+        unsafe { allocator.dealloc(ptr, layout) };
     }
 
     let recovered = allocator.alloc(layout);
     assert!(recovered.is_ok());
 
     if let Ok(ptr) = recovered {
-        allocator.dealloc(ptr, layout);
+        unsafe { allocator.dealloc(ptr, layout) };
     }
 
     for ptr in allocated {
-        allocator.dealloc(ptr, layout);
+        unsafe { allocator.dealloc(ptr, layout) };
     }
 
     unsafe { dealloc(meta_ptr, meta_layout) };
@@ -158,8 +165,8 @@ fn stress_exhaustion_recovery() {
 #[ignore = "stress test"]
 fn stress_fragmentation_recovery() {
     let heap = TestHeap::new(HEAP_SIZE);
-    let mut allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    let (meta_ptr, meta_layout) = init_allocator(&mut allocator, &heap, 2);
+    let allocator = GlobalAllocator::<PAGE_SIZE>::new();
+    let (meta_ptr, meta_layout) = init_allocator(&allocator, &heap, 2);
     let small_layout = Layout::from_size_align(64, 8).unwrap();
     let mut small_ptrs = Vec::new();
 
@@ -171,62 +178,19 @@ fn stress_fragmentation_recovery() {
     }
 
     for i in (0..small_ptrs.len()).step_by(2) {
-        allocator.dealloc(small_ptrs[i], small_layout);
+        unsafe { allocator.dealloc(small_ptrs[i], small_layout) };
     }
 
     let large_layout = Layout::from_size_align(PAGE_SIZE * 16, PAGE_SIZE).unwrap();
     let large = allocator.alloc(large_layout);
 
     for ptr in small_ptrs.into_iter().skip(1).step_by(2) {
-        allocator.dealloc(ptr, small_layout);
+        unsafe { allocator.dealloc(ptr, small_layout) };
     }
 
     if let Ok(ptr) = large {
-        allocator.dealloc(ptr, large_layout);
+        unsafe { allocator.dealloc(ptr, large_layout) };
     }
-
-    unsafe { dealloc(meta_ptr, meta_layout) };
-}
-
-#[cfg(feature = "tracking")]
-#[test]
-#[ignore = "stress test"]
-fn stress_tracking_invariants() {
-    let heap = TestHeap::new(HEAP_SIZE);
-    let mut allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    let (meta_ptr, meta_layout) = init_allocator(&mut allocator, &heap, 2);
-    let mut rng = rand::rngs::StdRng::from_seed([1; 32]);
-    let mut allocated = Vec::new();
-
-    for i in 0..5000 {
-        MOCK_OS.set_cpu(i % 2);
-        if allocated.is_empty() || rng.random_bool(0.6) {
-            let size: usize = rng.random_range(8..4097);
-            let layout = if size <= 2048 {
-                Layout::from_size_align(size.next_power_of_two().min(2048), 8).unwrap()
-            } else {
-                let aligned = size.div_ceil(PAGE_SIZE) * PAGE_SIZE;
-                Layout::from_size_align(aligned, PAGE_SIZE).unwrap()
-            };
-
-            if let Ok(ptr) = allocator.alloc(layout) {
-                allocated.push((ptr, layout));
-            }
-        } else {
-            let idx = rng.random_range(0..allocated.len());
-            let (ptr, layout) = allocated.swap_remove(idx);
-            allocator.dealloc(ptr, layout);
-        }
-    }
-
-    for (ptr, layout) in allocated {
-        allocator.dealloc(ptr, layout);
-    }
-
-    let stats = allocator.get_stats();
-    assert!(stats.used_pages <= stats.total_pages);
-    assert!(stats.free_pages <= stats.total_pages);
-    assert_eq!(stats.used_pages + stats.free_pages, stats.total_pages);
 
     unsafe { dealloc(meta_ptr, meta_layout) };
 }

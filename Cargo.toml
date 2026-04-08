@@ -1,37 +1,22 @@
 [package]
-name = "buddy-slab-allocator"
-version = "0.2.0"
-edition = "2021"
 authors = ["Song Zhiyong <songzhyo@qq.com>"]
+categories = ["memory-management", "no-std", "embedded"]
 description = "Memory allocator with Buddy and Slab allocation"
 documentation = "https://docs.rs/buddy-slab-allocator"
-repository = "https://github.com/arceos-hypervisor/buddy-slab-allocator"
-readme = "README.md"
-license = "Apache-2.0"
+edition = "2021"
 keywords = ["buddy", "slab", "allocator"]
-categories = ["memory-management", "no-std", "embedded"]
+license = "Apache-2.0"
+name = "buddy-slab-allocator"
+readme = "README.md"
+repository = "https://github.com/arceos-hypervisor/buddy-slab-allocator"
+version = "0.2.0"
 
 [features]
 default = []
-tracking = []
 
 [dependencies]
-cfg-if = "1.0"
 log = "0.4"
 spin = "0.10"
 
 [dev-dependencies]
-criterion = { version = "0.8", features = ["html_reports"] }
-rand = { version = "0.10", features = ["std_rng"] }
-
-[[bench]]
-name = "global_allocator"
-harness = false
-
-[[bench]]
-name = "buddy_allocator"
-harness = false
-
-[[bench]]
-name = "slab_allocator"
-harness = false
+rand = {version = "0.10", features = ["std_rng"]}
