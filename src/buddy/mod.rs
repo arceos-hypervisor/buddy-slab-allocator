@@ -69,7 +69,15 @@ impl<const PAGE_SIZE: usize> BuddyAllocator<PAGE_SIZE> {
             os: None,
         }
     }
+}
 
+impl<const PAGE_SIZE: usize> Default for BuddyAllocator<PAGE_SIZE> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const PAGE_SIZE: usize> BuddyAllocator<PAGE_SIZE> {
     /// Initialise the allocator over a heap region, using `meta` for page metadata.
     ///
     /// # Safety

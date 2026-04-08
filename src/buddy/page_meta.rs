@@ -1,7 +1,7 @@
-/// Per-page metadata stored in the external metadata region.
-///
-/// Each page frame in the heap has a corresponding `PageMeta` entry.
-/// Free pages are linked together via intrusive doubly-linked lists using PFN indices.
+//! Per-page metadata stored in the external metadata region.
+//!
+//! Each page frame in the heap has a corresponding [`PageMeta`] entry.
+//! Free pages are linked together via intrusive doubly-linked lists using PFN indices.
 
 /// Sentinel value indicating "no page" in free-list links.
 pub const PFN_NONE: u32 = u32::MAX;
@@ -38,6 +38,12 @@ pub struct PageMeta {
 }
 
 const _: () = assert!(core::mem::size_of::<PageMeta>() == 12);
+
+impl Default for PageMeta {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl PageMeta {
     /// Create a zeroed (free, order-0) page meta.

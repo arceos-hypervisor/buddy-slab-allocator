@@ -75,7 +75,15 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
             initialized: AtomicBool::new(false),
         }
     }
+}
 
+impl<const PAGE_SIZE: usize> Default for GlobalAllocator<PAGE_SIZE> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
     /// Initialise the allocator.
     ///
     /// # Arguments

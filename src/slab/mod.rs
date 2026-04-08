@@ -59,7 +59,15 @@ impl<const PAGE_SIZE: usize> SlabAllocator<PAGE_SIZE> {
             ],
         }
     }
+}
 
+impl<const PAGE_SIZE: usize> Default for SlabAllocator<PAGE_SIZE> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const PAGE_SIZE: usize> SlabAllocator<PAGE_SIZE> {
     /// Try to allocate an object matching `layout`.
     ///
     /// If the matching cache is exhausted, [`SlabAllocResult::NeedsSlab`] is returned
