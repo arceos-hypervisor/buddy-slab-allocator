@@ -421,3 +421,61 @@ fn stress_multithread_exhaustion_recovery() {
     assert!(recovered.load(Ordering::Relaxed));
     assert_eq!(count_free_pages(allocator), baseline);
 }
+
+#[test]
+#[ignore = "stress test"]
+fn stress_add_region_then_multithread_alloc_free() {
+    let mut first = HostRegion::new(2 * 1024 * 1024, PAGE_SIZE * 4);
+    let mut second = HostRegion::new(4 * 1024 * 1024, PAGE_SIZE * 4);
+    let mut third = HostRegion::new(4 * 1024 * 1024, PAGE_SIZE * 4);
+    let allocator = GlobalAllocator::<PAGE_SIZE>::new();
+    init_global(&allocator, &mut first, WORKERS, &TEST_OS);
+    unsafe {
+        allocator.add_region(second.as_mut_slice()).unwrap();
+        allocator.add_region(third.as_mut_slice()).unwrap();
+    }
+    assert_eq!(allocator.managed_section_count(), 3);
+
+    let baseline = count_free_pages(&allocator);
+    let allocator = &allocator;
+    let barrier = Barrier::new(WORKERS);
+
+    thread::scope(|scope| {
+        for cpu in 0..WORKERS {
+            let barrier = &barrier;
+            scope.spawn(move || {
+                set_current_cpu(cpu);
+                barrier.wait();
+
+                let mut rng = seeded_rng(0x3000 + cpu as u64);
+                let mut live: Vec<(usize, Layout)> = Vec::new();
+                for _ in 0..5_000 {
+                    if live.is_empty() || rng.random_bool(0.65) {
+                        let layout = if rng.random_bool(0.75) {
+                            let size: usize = rng.random_range(8..=2048);
+                            Layout::from_size_align(size.next_power_of_two().min(2048), 8).unwrap()
+                        } else {
+                            let pages = [1usize, 2, 4, 8][rng.random_range(0..4)];
+                            Layout::from_size_align(pages * PAGE_SIZE, PAGE_SIZE).unwrap()
+                        };
+
+                        if let Ok(ptr) = allocator.alloc(layout) {
+                            live.push((ptr.as_ptr() as usize, layout));
+                        }
+                    } else {
+                        let idx = rng.random_range(0..live.len());
+                        let (addr, layout) = live.swap_remove(idx);
+                        unsafe { allocator.dealloc(nonnull_from_addr(addr), layout) };
+                    }
+                }
+
+                for (addr, layout) in live {
+                    unsafe { allocator.dealloc(nonnull_from_addr(addr), layout) };
+                }
+            });
+        }
+    });
+
+    assert_eq!(allocator.managed_section_count(), 3);
+    assert_recovered_with_cached_slabs(allocator, baseline, WORKERS, &SizeClass::ALL);
+}

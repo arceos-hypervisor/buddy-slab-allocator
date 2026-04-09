@@ -7,7 +7,7 @@ A `no_std` two-level allocator for kernel and embedded environments, combining a
 The current implementation is built from three layers:
 
 1. `BuddyAllocator`
-   Manages a contiguous virtual heap in page units, with power-of-two splitting and merging.
+   Manages one or more virtual memory sections in page units, with power-of-two splitting and merging.
 2. `SlabAllocator`
    Manages small objects up to 2048 bytes with fixed size classes.
 3. `GlobalAllocator`
@@ -70,6 +70,7 @@ sequenceDiagram
 ## Features
 
 - Buddy page allocation with splitting and merging
+- Dynamic hot-add of managed regions via `add_region`
 - Slab allocation for 9 size classes: `8..=2048`
 - Per-CPU slab caches
 - Lock-free cross-CPU remote frees
@@ -117,6 +118,17 @@ let ptr = allocator.alloc(layout).unwrap();
 unsafe {
     allocator.dealloc(ptr, layout);
 }
+
+// More memory can be added later.
+let extra_region_start = 0x9000_0000 as *mut u8;
+let extra_region_size = 8 * 1024 * 1024;
+let extra_region = unsafe {
+    core::slice::from_raw_parts_mut(extra_region_start, extra_region_size)
+};
+
+unsafe {
+    allocator.add_region(extra_region).unwrap();
+}
 ```
 
 ## Using Buddy and Slab separately
@@ -130,15 +142,13 @@ use buddy_slab_allocator::{
 use core::alloc::Layout;
 
 const PAGE_SIZE: usize = 0x1000;
-const HEAP_SIZE: usize = 16 * 1024 * 1024;
-
-let heap_start = 0x8000_0000usize;
-let meta_size = BuddyAllocator::<PAGE_SIZE>::required_meta_size(HEAP_SIZE);
-let meta_ptr = 0x9000_0000 as *mut u8;
+let region_start = 0x8000_0000 as *mut u8;
+let region_size = 16 * 1024 * 1024;
+let region = unsafe { core::slice::from_raw_parts_mut(region_start, region_size) };
 
 let mut buddy = BuddyAllocator::<PAGE_SIZE>::new();
 unsafe {
-    buddy.init(meta_ptr, meta_size, heap_start, HEAP_SIZE, None).unwrap();
+    buddy.init(region, None).unwrap();
 }
 
 let mut slab = SlabAllocator::<PAGE_SIZE>::new();
@@ -161,14 +171,26 @@ match slab.dealloc(ptr, layout) {
         buddy.dealloc_pages(base, pages);
     }
 }
+
+let extra_region_start = 0x9000_0000 as *mut u8;
+let extra_region_size = 8 * 1024 * 1024;
+let extra_region = unsafe {
+    core::slice::from_raw_parts_mut(extra_region_start, extra_region_size)
+};
+
+unsafe {
+    buddy.add_region(extra_region).unwrap();
+}
 ```
 
 ## Public API summary
 
 - `GlobalAllocator<PAGE_SIZE>`
-  High-level allocator facade that can also implement `GlobalAlloc`.
+  High-level allocator facade that can also implement `GlobalAlloc`, and supports `add_region`, `managed_section_count`, `managed_section`, `managed_bytes`, and `allocated_bytes`.
 - `BuddyAllocator<PAGE_SIZE>`
-  Standalone page allocator.
+  Standalone multi-section page allocator, supporting `init`, `add_region`, section queries, `managed_bytes`, and `allocated_bytes`.
+- `ManagedSection`
+  Read-only summary for one managed section.
 - `SlabAllocator<PAGE_SIZE>`
   Standalone slab allocator.
 - `SizeClass`
@@ -179,6 +201,9 @@ match slab.dealloc(ptr, layout) {
   `Done` or `FreeSlab { base, pages }`.
 - `OsImpl`
   Provides `current_cpu_idx()` and `virt_to_phys()` for per-CPU routing and lowmem selection.
+
+`managed_bytes` counts only allocatable heap bytes and excludes region-prefix metadata.
+`allocated_bytes` is backend page occupancy, not the exact sum of requested `layout.size()`.
 
 ## Testing
 

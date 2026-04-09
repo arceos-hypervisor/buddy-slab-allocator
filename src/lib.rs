@@ -14,7 +14,7 @@ mod error;
 pub use error::{AllocError, AllocResult};
 
 pub mod buddy;
-pub use buddy::BuddyAllocator;
+pub use buddy::{BuddyAllocator, ManagedSection};
 
 pub mod slab;
 pub use slab::{SizeClass, SlabAllocResult, SlabAllocator, SlabDeallocResult};

@@ -1,6 +1,6 @@
 # buddy-slab-allocator 设计文档
 
-本文档面向阅读和维护当前实现的开发者，描述这个分配器在 `buddy + slab` 两级结构下的核心数据结构、初始化过程、`alloc` / `dealloc` 路径，以及多核并发场景下的协作方式。
+本文档面向阅读和维护当前实现的开发者，描述这个分配器在 `buddy + slab` 两级结构下的核心数据结构、初始化过程、`add_region` 热添加流程、`alloc` / `dealloc` 路径，以及多核并发场景下的协作方式。
 
 文中描述以当前仓库实现为准，重点对应以下模块：
 
@@ -20,7 +20,7 @@
 因此整体采用两级结构：
 
 - 后端：`BuddyAllocator`
-  负责管理一段连续虚拟地址区间中的页。
+  负责管理一个或多个 section 中的页。
 - 前端：`SlabAllocator`
   负责管理不同 size class 的小对象。
 - 门面：`GlobalAllocator`
@@ -42,8 +42,9 @@ flowchart TD
     SC64 --> SPH
     SC2K --> SPH
 
-    B --> PM[PageMeta[]]
-    B --> FL[free_lists by order]
+    B --> SH[BuddySection intrusive list]
+    SH --> PM[PageMeta[]]
+    SH --> FL[free_lists by order]
 ```
 
 ### 2.1 地址语义
@@ -59,75 +60,117 @@ flowchart TD
 - 候选块的虚拟地址通过 `OsImpl::virt_to_phys()` 翻译成物理地址。
 - 只有物理地址低于 `4 GiB` 的块才会被当作 DMA32 候选。
 
-## 3. 初始化与内存布局
+### 2.2 容量统计语义
 
-`GlobalAllocator::init(region, cpu_count, os)` 会把调用者提供的整段区域拆成两部分：
+当前公开了两类整体容量统计：
 
-- 前缀：元数据区
-- 后缀：真正交给 buddy 管理的 heap 区
+- `managed_bytes`
+  所有 section 中可分配 heap 的总字节数，不包含 region 前缀 metadata。
+- `allocated_bytes`
+  后端页占用字节数，按 `managed_bytes - free_pages * PAGE_SIZE` 计算。
 
-元数据区又细分为：
+因此 `allocated_bytes` 的口径是“页后端已经占住多少字节”，不是用户请求的 `layout.size()` 精确累加。
+它会包含：
 
+- slab 页
+- empty slab cache 保留页
+- 对齐放大
+- buddy / slab 的内部碎片
+
+## 3. 初始化、追加 Region 与内存布局
+
+当前实现支持两种 region 进入 allocator 的方式：
+
+- `GlobalAllocator::init(region, cpu_count, os)`
+  注册首个 region，并初始化唯一一份 per-CPU slab 槽位。
+- `GlobalAllocator::add_region(region)`
+  在运行时追加新的 region，只扩展 buddy 后端，不再重复创建 per-CPU slab。
+
+对 buddy 而言，每个 region 都会被拆成：
+
+- 前缀：region 自带元数据
+- 后缀：该 section 的 managed heap
+
+首个 global region 的元数据前缀包含：
+
+- `BuddySection`
 - `PageMeta[]`
 - `per_cpu_slabs: [SpinMutex<SlabAllocator>; cpu_count]`
 
+后续追加 region 的元数据前缀只包含：
+
+- `BuddySection`
+- `PageMeta[]`
+
 ```mermaid
 flowchart LR
-    A[region start] --> B[aligned meta_start]
-    B --> C[Buddy PageMeta array]
-    C --> D[padding for alignment]
-    D --> E[per-CPU SlabAllocator slots]
-    E --> F[padding to PAGE_SIZE]
-    F --> G[managed_heap_start]
-    G --> H[managed heap managed by BuddyAllocator]
+    A[region start] --> B[aligned section_start]
+    B --> C[BuddySection]
+    C --> D[PageMeta array]
+    D --> E{first global region?}
+    E -- Yes --> F[per-CPU SlabAllocator slots]
+    E -- No --> G[no slab slots here]
+    F --> H[padding to PAGE_SIZE]
+    G --> H
+    H --> I[section heap start]
+    I --> J[managed heap of this section]
 ```
 
 ### 3.1 初始化步骤
 
 `GlobalAllocator::init()` 的主要步骤如下：
 
-1. 根据 `region.len()` 和 `cpu_count` 计算最多能管理多少页。
-2. 为这批页预留足够的 `PageMeta[]` 和 per-CPU slab 槽位。
-3. 选择一个页对齐的 `managed_heap_start`。
-4. 调用 `BuddyAllocator::init()` 初始化后端页分配器。
+1. 根据 `region.len()` 和 `cpu_count` 计算首个 section 最多能管理多少页。
+2. 在 region 前缀预留 `BuddySection + PageMeta[] + per_cpu_slabs`。
+3. 选择一个页对齐的 section heap 起点。
+4. 将首个 section 注册进 `BuddyAllocator`。
 5. 原地构造每个 CPU 对应的 `SpinMutex<SlabAllocator>`。
 6. 将 `per_cpu_slabs`、`cpu_count`、`os` 写入 `GlobalAllocator`。
+
+`GlobalAllocator::add_region()` 的步骤更简单：
+
+1. 校验 allocator 已初始化。
+2. 在新 region 前缀预留 `BuddySection + PageMeta[]`。
+3. 计算该 section 的可管理 heap。
+4. 将该 section 追加到 buddy 的 intrusive list 尾部。
 
 ### 3.2 为什么 metadata 放在 region 前缀
 
 这样做有几个好处：
 
 - 不需要额外的启动期堆分配。
-- `BuddyAllocator` 的 `PageMeta[]` 生命周期天然和被管理区域一致。
+- `BuddySection` 与 `PageMeta[]` 都跟随 region 自身生命周期。
 - `per_cpu_slabs` 的内存来源和被管理堆绑在一起，部署简单。
+- 不需要预先声明最大 section 数量。
 
 代价是：
 
 - metadata 会消耗一部分可分配空间。
-- `managed_heap_start` 可能晚于 `region` 起点。
+- 每个 section 的 heap 起点都可能晚于各自的 region 起点。
+- section 查询与地址归属定位当前采用线性扫描。
 
 ## 4. BuddyAllocator 设计
 
-`BuddyAllocator` 管理页级连续内存，是整个系统的共享后端。
+`BuddyAllocator` 管理页级内存，是整个系统的共享后端。它的基本单位不再是单一 heap，而是一个按注册顺序串起来的 section 链表。
 
 ### 4.1 核心数据结构
 
 ```mermaid
 classDiagram
     class BuddyAllocator {
+        +sections_head: *mut BuddySection
+        +section_count: usize
+        +os: Option<&dyn OsImpl>
+    }
+
+    class BuddySection {
+        +next: *mut BuddySection
         +meta: *mut PageMeta
         +heap_start: usize
         +heap_size: usize
         +free_lists: [u32; MAX_ORDER+1]
         +free_pages: usize
-        +os: Option<&dyn OsImpl>
-    }
-
-    class PageMeta {
-        +flags: PageFlags
-        +order: u8
-        +prev: u32
-        +next: u32
+        +total_pages: usize
     }
 
     class PageFlags {
@@ -140,21 +183,22 @@ classDiagram
 
 说明：
 
-- `PageMeta` 是每页一项的外部元数据。
-- `free_lists[order]` 保存对应阶的空闲块链表头。
-- 链表节点不是单独分配的，而是复用 `PageMeta.prev/next`。
+- `BuddyAllocator` 自身只维护 section 链表头和 section 数量。
+- 每个 `BuddySection` 都拥有自己的一组 `PageMeta[]` 和 `free_lists`。
+- `PageMeta` 仍然是每页一项的外部元数据。
+- 同一 section 内按 buddy 规则拆分和合并，section 之间不跨界合并。
 
 ### 4.2 buddy 初始化
 
-初始化时，buddy 会从低地址到高地址扫描整段 heap：
+初始化某个 section 时，buddy 会从低地址到高地址扫描该 section 的整段 heap：
 
 - 每次尽量切出“当前地址自然对齐、且仍然放得下”的最大 order 块。
 - 将该块挂到对应 order 的 free list。
 
 这一步的结果是：
 
-- 所有页都被覆盖。
-- free list 从一开始就处于可分裂、可合并的标准 buddy 形态。
+- 该 section 中的所有页都被覆盖。
+- 该 section 的 free list 从一开始就处于可分裂、可合并的标准 buddy 形态。
 
 ### 4.3 页分配流程
 
@@ -163,13 +207,17 @@ flowchart TD
     A[alloc_pages(count, align)] --> B[计算 order]
     B --> C[计算 align_order]
     C --> D[effective_order = max(order, align_order)]
-    D --> E[从 effective_order 向上找非空 free list]
-    E --> F{找到块?}
-    F -- 否 --> G[返回 NoMemory]
-    F -- 是 --> H[弹出大块]
-    H --> I[逐级 split 到目标 order]
-    I --> J[标记头页为 Allocated]
-    J --> K[返回虚拟地址]
+    D --> E[按注册顺序扫描 section]
+    E --> F[在 section 内从 effective_order 向上找非空 free list]
+    F --> G{找到块?}
+    G -- 否 --> H[尝试下一个 section]
+    H --> I{还有 section?}
+    I -- 否 --> J[返回 NoMemory]
+    I -- 是 --> F
+    G -- 是 --> K[弹出大块]
+    K --> L[逐级 split 到目标 order]
+    L --> M[标记头页为 Allocated]
+    M --> N[返回虚拟地址]
 ```
 
 注意点：

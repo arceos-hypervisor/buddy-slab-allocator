@@ -7,7 +7,7 @@
 当前实现由三层组成：
 
 1. `BuddyAllocator`
-   管理一段连续虚拟地址区间中的页，支持按 2 的幂分裂与合并。
+   管理一个或多个虚拟内存 section，支持按 2 的幂分裂与合并。
 2. `SlabAllocator`
    管理 `<= 2048` 字节的小对象，采用固定 size class。
 3. `GlobalAllocator`
@@ -70,6 +70,7 @@ sequenceDiagram
 ## 特性
 
 - Buddy 页分配，支持拆分与合并
+- 支持通过 `add_region` 动态追加可管理 region
 - Slab 小对象分配，固定 9 个 size class：`8..=2048`
 - per-CPU slab cache
 - 跨 CPU 释放走 lock-free remote free
@@ -117,6 +118,16 @@ let ptr = allocator.alloc(layout).unwrap();
 unsafe {
     allocator.dealloc(ptr, layout);
 }
+
+let extra_region_start = 0x9000_0000 as *mut u8;
+let extra_region_size = 8 * 1024 * 1024;
+let extra_region = unsafe {
+    core::slice::from_raw_parts_mut(extra_region_start, extra_region_size)
+};
+
+unsafe {
+    allocator.add_region(extra_region).unwrap();
+}
 ```
 
 ## 分别使用 Buddy 与 Slab
@@ -130,15 +141,13 @@ use buddy_slab_allocator::{
 use core::alloc::Layout;
 
 const PAGE_SIZE: usize = 0x1000;
-const HEAP_SIZE: usize = 16 * 1024 * 1024;
-
-let heap_start = 0x8000_0000usize;
-let meta_size = BuddyAllocator::<PAGE_SIZE>::required_meta_size(HEAP_SIZE);
-let meta_ptr = 0x9000_0000 as *mut u8;
+let region_start = 0x8000_0000 as *mut u8;
+let region_size = 16 * 1024 * 1024;
+let region = unsafe { core::slice::from_raw_parts_mut(region_start, region_size) };
 
 let mut buddy = BuddyAllocator::<PAGE_SIZE>::new();
 unsafe {
-    buddy.init(meta_ptr, meta_size, heap_start, HEAP_SIZE, None).unwrap();
+    buddy.init(region, None).unwrap();
 }
 
 let mut slab = SlabAllocator::<PAGE_SIZE>::new();
@@ -161,14 +170,26 @@ match slab.dealloc(ptr, layout) {
         buddy.dealloc_pages(base, pages);
     }
 }
+
+let extra_region_start = 0x9000_0000 as *mut u8;
+let extra_region_size = 8 * 1024 * 1024;
+let extra_region = unsafe {
+    core::slice::from_raw_parts_mut(extra_region_start, extra_region_size)
+};
+
+unsafe {
+    buddy.add_region(extra_region).unwrap();
+}
 ```
 
 ## 公开 API 摘要
 
 - `GlobalAllocator<PAGE_SIZE>`
-  高层门面，也可以作为 `GlobalAlloc` 使用。
+  高层门面，也可以作为 `GlobalAlloc` 使用，并支持 `add_region`、`managed_section_count`、`managed_section`、`managed_bytes` 与 `allocated_bytes`。
 - `BuddyAllocator<PAGE_SIZE>`
-  独立页分配器。
+  独立多 section 页分配器，支持 `init`、`add_region`、section 查询、`managed_bytes` 与 `allocated_bytes`。
+- `ManagedSection`
+  单个 managed section 的只读摘要。
 - `SlabAllocator<PAGE_SIZE>`
   独立 slab 分配器。
 - `SizeClass`
@@ -179,6 +200,9 @@ match slab.dealloc(ptr, layout) {
   `Done` 或 `FreeSlab { base, pages }`。
 - `OsImpl`
   提供 `current_cpu_idx()` 和 `virt_to_phys()`，用于 per-CPU 路由与 lowmem 选择。
+
+`managed_bytes` 只统计可分配 heap，不包含 region 前缀 metadata。
+`allocated_bytes` 表示后端页占用，不是用户请求的 `layout.size()` 精确求和。
 
 ## 测试
 

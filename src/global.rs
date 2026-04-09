@@ -8,14 +8,15 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use spin::Mutex as SpinMutex;
 
-use crate::buddy::{BuddyAllocator, PageFlags};
+use crate::buddy::{BuddyAllocator, BuddySection, ManagedSection, PageFlags};
 use crate::error::{AllocError, AllocResult};
 use crate::slab::page::{SlabPageHeader, SLAB_MAGIC};
 use crate::slab::size_class::{SizeClass, SLAB_MAX_SIZE};
 use crate::slab::{SlabAllocResult, SlabAllocator, SlabDeallocResult};
 use crate::{align_up, OsImpl};
 
-struct RegionLayout {
+struct InitialRegionLayout {
+    section_start: usize,
     meta_start: usize,
     meta_size: usize,
     buddy_meta_size: usize,
@@ -35,42 +36,43 @@ pub struct GlobalAllocator<const PAGE_SIZE: usize = 0x1000> {
 
 // SAFETY: All mutable state is behind SpinMutex or AtomicBool.
 // `per_cpu_slabs` is a raw pointer into the reserved metadata prefix of the
-// caller-provided region (same lifetime model as BuddyAllocator::meta).
+// caller-provided region.
 unsafe impl<const PAGE_SIZE: usize> Sync for GlobalAllocator<PAGE_SIZE> {}
 unsafe impl<const PAGE_SIZE: usize> Send for GlobalAllocator<PAGE_SIZE> {}
 
 impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
-    // ------------------------------------------------------------------
-    // Metadata sizing
-    // ------------------------------------------------------------------
-
-    /// Required alignment for the reserved metadata prefix.
     const fn metadata_align() -> usize {
-        let a1 = core::mem::align_of::<crate::buddy::PageMeta>();
-        let a2 = core::mem::align_of::<SpinMutex<SlabAllocator<PAGE_SIZE>>>();
-        if a1 > a2 {
-            a1
+        let a1 = core::mem::align_of::<BuddySection>();
+        let a2 = core::mem::align_of::<crate::buddy::PageMeta>();
+        let a3 = core::mem::align_of::<SpinMutex<SlabAllocator<PAGE_SIZE>>>();
+        let m = if a1 > a2 { a1 } else { a2 };
+        if m > a3 {
+            m
         } else {
-            a2
+            a3
         }
     }
 
     fn metadata_layout_for_pages(pages: usize, cpu_count: usize) -> Option<(usize, usize, usize)> {
+        let meta_offset = align_up(
+            core::mem::size_of::<BuddySection>(),
+            core::mem::align_of::<crate::buddy::PageMeta>(),
+        );
         let buddy_meta_size = pages.checked_mul(core::mem::size_of::<crate::buddy::PageMeta>())?;
         let slab_align = core::mem::align_of::<SpinMutex<SlabAllocator<PAGE_SIZE>>>();
-        let slab_offset = align_up(buddy_meta_size, slab_align);
+        let slab_offset = align_up(meta_offset.checked_add(buddy_meta_size)?, slab_align);
         let slab_size =
             core::mem::size_of::<SpinMutex<SlabAllocator<PAGE_SIZE>>>().checked_mul(cpu_count)?;
         let meta_size = slab_offset.checked_add(slab_size)?;
-        Some((buddy_meta_size, slab_offset, meta_size))
+        Some((meta_offset, buddy_meta_size, meta_size))
     }
 
     fn available_heap_pages(
         region_end: usize,
-        meta_start: usize,
+        section_start: usize,
         meta_size: usize,
     ) -> Option<usize> {
-        let managed_heap_start = align_up(meta_start.checked_add(meta_size)?, PAGE_SIZE);
+        let managed_heap_start = align_up(section_start.checked_add(meta_size)?, PAGE_SIZE);
         if managed_heap_start > region_end {
             return Some(0);
         }
@@ -79,36 +81,40 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
 
     fn can_manage_pages(
         region_end: usize,
-        meta_start: usize,
+        section_start: usize,
         cpu_count: usize,
         pages: usize,
     ) -> bool {
         let Some((_, _, meta_size)) = Self::metadata_layout_for_pages(pages, cpu_count) else {
             return false;
         };
-        let Some(available_pages) = Self::available_heap_pages(region_end, meta_start, meta_size)
+        let Some(available_pages) =
+            Self::available_heap_pages(region_end, section_start, meta_size)
         else {
             return false;
         };
         available_pages >= pages
     }
 
-    fn compute_region_layout(
+    fn compute_initial_region_layout(
         region_start: usize,
         region_size: usize,
         cpu_count: usize,
-    ) -> Option<RegionLayout> {
+    ) -> Option<InitialRegionLayout> {
         if cpu_count == 0 || region_size == 0 || !PAGE_SIZE.is_power_of_two() {
             return None;
         }
 
         let region_end = region_start.checked_add(region_size)?;
-        let meta_start = align_up(region_start, Self::metadata_align());
-        if meta_start >= region_end {
+        let section_start = align_up(region_start, Self::metadata_align());
+        if section_start >= region_end {
             return None;
         }
 
-        let heap_search_start = align_up(region_start, PAGE_SIZE);
+        let heap_search_start = align_up(
+            section_start.checked_add(core::mem::size_of::<BuddySection>())?,
+            PAGE_SIZE,
+        );
         let max_pages = if heap_search_start >= region_end {
             0
         } else {
@@ -119,7 +125,7 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
         let mut high = max_pages;
         while low < high {
             let mid = low + (high - low).div_ceil(2);
-            if Self::can_manage_pages(region_end, meta_start, cpu_count, mid) {
+            if Self::can_manage_pages(region_end, section_start, cpu_count, mid) {
                 low = mid;
             } else {
                 high = mid - 1;
@@ -130,12 +136,18 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
             return None;
         }
 
-        let (buddy_meta_size, slab_offset, meta_size) =
+        let (meta_offset, buddy_meta_size, meta_size) =
             Self::metadata_layout_for_pages(low, cpu_count)?;
-        let managed_heap_start = align_up(meta_start.checked_add(meta_size)?, PAGE_SIZE);
+        let meta_start = section_start.checked_add(meta_offset)?;
+        let slab_offset = align_up(
+            meta_offset.checked_add(buddy_meta_size)?,
+            core::mem::align_of::<SpinMutex<SlabAllocator<PAGE_SIZE>>>(),
+        );
+        let managed_heap_start = align_up(section_start.checked_add(meta_size)?, PAGE_SIZE);
         let managed_heap_size = low.checked_mul(PAGE_SIZE)?;
 
-        Some(RegionLayout {
+        Some(InitialRegionLayout {
+            section_start,
             meta_start,
             meta_size,
             buddy_meta_size,
@@ -144,10 +156,6 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
             managed_heap_size,
         })
     }
-
-    // ------------------------------------------------------------------
-    // Construction / initialisation
-    // ------------------------------------------------------------------
 
     /// Create an uninitialised global allocator.
     pub const fn new() -> Self {
@@ -168,13 +176,7 @@ impl<const PAGE_SIZE: usize> Default for GlobalAllocator<PAGE_SIZE> {
 }
 
 impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
-    /// Initialise the allocator.
-    ///
-    /// # Arguments
-    /// - `region` — total writable region to reserve for this allocator.
-    ///   The allocator carves metadata from the region prefix and manages the remaining tail.
-    /// - `cpu_count` — number of CPUs (≥ 1).
-    /// - `os` — platform abstraction.
+    /// Initialise the allocator over the first region.
     ///
     /// # Safety
     /// - `region` must be writable and remain valid for the lifetime of this allocator.
@@ -187,29 +189,31 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
     ) -> AllocResult {
         let region_start = region.as_mut_ptr() as usize;
         let region_size = region.len();
-        let layout = Self::compute_region_layout(region_start, region_size, cpu_count)
+        let layout = Self::compute_initial_region_layout(region_start, region_size, cpu_count)
             .ok_or(AllocError::InvalidParam)?;
+        let section_ptr = layout.section_start as *mut BuddySection;
         let meta_ptr = layout.meta_start as *mut u8;
-        let slab_ptr = meta_ptr.add(layout.slab_offset) as *mut SpinMutex<SlabAllocator<PAGE_SIZE>>;
+        let slab_ptr =
+            (layout.section_start + layout.slab_offset) as *mut SpinMutex<SlabAllocator<PAGE_SIZE>>;
 
-        // --- Init buddy ---
         let mut buddy = self.buddy.lock();
-        buddy.init(
+        buddy.reset(Some(os));
+        buddy.add_region_raw(
+            region_start,
+            region_size,
+            section_ptr,
             meta_ptr,
             layout.buddy_meta_size,
             layout.managed_heap_start,
             layout.managed_heap_size,
-            Some(os),
         )?;
         drop(buddy);
 
-        // --- Init per-CPU slabs ---
         for i in 0..cpu_count {
             let slot = slab_ptr.add(i);
             slot.write(SpinMutex::new(SlabAllocator::new()));
         }
 
-        // --- Write fields via interior mutability (self is &self for GlobalAlloc compat) ---
         let self_mut = self as *const Self as *mut Self;
         (*self_mut).per_cpu_slabs = slab_ptr;
         (*self_mut).cpu_count = cpu_count;
@@ -217,11 +221,11 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
         self.initialized.store(true, Ordering::Release);
 
         log::debug!(
-            "GlobalAllocator: {} CPUs, region {:#x}+{:#x}, meta {:#x}+{:#x}, managed heap {:#x}+{:#x}",
+            "GlobalAllocator: {} CPUs, region {:#x}+{:#x}, meta {:#x}+{:#x}, first heap {:#x}+{:#x}",
             cpu_count,
             region_start,
             region_size,
-            layout.meta_start,
+            layout.section_start,
             layout.meta_size,
             layout.managed_heap_start,
             layout.managed_heap_size,
@@ -230,21 +234,44 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
         Ok(())
     }
 
-    /// Start address of the heap range actually managed by the buddy allocator.
-    pub fn managed_heap_start(&self) -> usize {
-        self.buddy.lock().heap_start()
+    /// Add a new managed region after [`init`](Self::init).
+    ///
+    /// # Safety
+    /// - `region` must be writable and remain valid for the lifetime of this allocator.
+    /// - The region must not overlap any already managed region.
+    pub unsafe fn add_region(&self, region: &mut [u8]) -> AllocResult {
+        if !self.initialized.load(Ordering::Acquire) {
+            return Err(AllocError::NotInitialized);
+        }
+        self.buddy.lock().add_region(region)
     }
 
-    /// Size in bytes of the heap range actually managed by the buddy allocator.
-    pub fn managed_heap_size(&self) -> usize {
-        self.buddy.lock().heap_size()
+    /// Number of managed sections.
+    pub fn managed_section_count(&self) -> usize {
+        self.buddy.lock().section_count()
     }
 
-    // ------------------------------------------------------------------
-    // Public page-level API (forwarded to buddy)
-    // ------------------------------------------------------------------
+    /// Read-only summary for a managed section.
+    pub fn managed_section(&self, index: usize) -> Option<ManagedSection> {
+        self.buddy.lock().section(index)
+    }
 
-    /// Allocate contiguous pages.  Returns the virtual start address.
+    /// Total managed heap bytes across all sections.
+    ///
+    /// This excludes region-prefix metadata such as `BuddySection`, `PageMeta[]`,
+    /// and per-CPU slab slots.
+    pub fn managed_bytes(&self) -> usize {
+        self.buddy.lock().managed_bytes()
+    }
+
+    /// Allocated backend bytes across all sections.
+    ///
+    /// This is page-level occupancy, not the exact sum of requested layout sizes.
+    pub fn allocated_bytes(&self) -> usize {
+        self.buddy.lock().allocated_bytes()
+    }
+
+    /// Allocate contiguous pages. Returns the virtual start address.
     pub fn alloc_pages(&self, count: usize, align: usize) -> AllocResult<usize> {
         self.buddy.lock().alloc_pages(count, align)
     }
@@ -259,11 +286,7 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
         self.buddy.lock().alloc_pages_lowmem(count, align)
     }
 
-    // ------------------------------------------------------------------
-    // Object-level API (slab or buddy fallback)
-    // ------------------------------------------------------------------
-
-    /// Allocate memory for `layout`.  Returns a pointer on success.
+    /// Allocate memory for `layout`. Returns a pointer on success.
     pub fn alloc(&self, layout: Layout) -> AllocResult<NonNull<u8>> {
         if !self.initialized.load(Ordering::Acquire) {
             return Err(AllocError::NotInitialized);
@@ -288,10 +311,6 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
         }
     }
 
-    // ------------------------------------------------------------------
-    // Internal: slab path
-    // ------------------------------------------------------------------
-
     #[inline]
     fn is_slab_eligible(&self, layout: &Layout) -> bool {
         layout.size() <= SLAB_MAX_SIZE && layout.align() <= SLAB_MAX_SIZE
@@ -308,12 +327,11 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
         match slab.alloc(layout)? {
             SlabAllocResult::Allocated(ptr) => Ok(ptr),
             SlabAllocResult::NeedsSlab { size_class, pages } => {
-                drop(slab); // release slab lock before locking buddy
+                drop(slab);
                 let bytes = pages * PAGE_SIZE;
                 let addr = self.buddy.lock().alloc_pages(pages, bytes)?;
-                // Tag the page as SLAB in buddy metadata.
                 unsafe {
-                    self.buddy.lock().set_page_flags(addr, PageFlags::Slab);
+                    self.buddy.lock().set_page_flags(addr, PageFlags::Slab)?;
                 }
                 let mut slab = slab_lock.lock();
                 slab.add_slab(size_class, addr, bytes, cpu as u16);
@@ -338,7 +356,6 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
         let current_cpu = os.current_cpu_idx();
 
         if owner_cpu == current_cpu {
-            // Local free path (under lock).
             let slab_lock = &*self.per_cpu_slabs.add(current_cpu);
             let mut slab = slab_lock.lock();
             match slab.dealloc(ptr, layout) {
@@ -349,20 +366,14 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
                 }
             }
         } else {
-            // Remote free path (lock-free CAS).
             hdr.remote_free(ptr.as_ptr() as usize);
         }
     }
-
-    // ------------------------------------------------------------------
-    // Internal: large allocation (buddy pages)
-    // ------------------------------------------------------------------
 
     fn large_alloc(&self, layout: Layout) -> AllocResult<NonNull<u8>> {
         let pages = align_up(layout.size(), PAGE_SIZE) / PAGE_SIZE;
         let align = layout.align().max(PAGE_SIZE);
         let addr = self.buddy.lock().alloc_pages(pages, align)?;
-        // SAFETY: buddy returns non-null, page-aligned addresses.
         Ok(unsafe { NonNull::new_unchecked(addr as *mut u8) })
     }
 
@@ -373,10 +384,6 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
             .dealloc_pages(ptr.as_ptr() as usize, pages);
     }
 }
-
-// ---------------------------------------------------------------------------
-// GlobalAlloc implementation
-// ---------------------------------------------------------------------------
 
 unsafe impl<const PAGE_SIZE: usize> GlobalAlloc for GlobalAllocator<PAGE_SIZE> {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
