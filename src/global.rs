@@ -8,7 +8,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use spin::Mutex as SpinMutex;
 
-use crate::buddy::{BuddyAllocator, BuddySection, ManagedSection, PageFlags};
+use crate::buddy::{BuddyAllocator, BuddySection, ManagedSection, PageFlags, SectionInitSpec};
 use crate::error::{AllocError, AllocResult};
 use crate::slab::page::{SlabPageHeader, SLAB_MAGIC};
 use crate::slab::size_class::{SizeClass, SLAB_MAX_SIZE};
@@ -198,15 +198,15 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
 
         let mut buddy = self.buddy.lock();
         buddy.reset(Some(os));
-        buddy.add_region_raw(
+        buddy.add_region_raw(SectionInitSpec {
             region_start,
             region_size,
             section_ptr,
             meta_ptr,
-            layout.buddy_meta_size,
-            layout.managed_heap_start,
-            layout.managed_heap_size,
-        )?;
+            meta_size: layout.buddy_meta_size,
+            heap_start: layout.managed_heap_start,
+            heap_size: layout.managed_heap_size,
+        })?;
         drop(buddy);
 
         for i in 0..cpu_count {

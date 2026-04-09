@@ -1,9 +1,6 @@
 #![allow(dead_code)]
 
-use buddy_slab_allocator::{
-    buddy::PageMeta, BuddyAllocator, GlobalAllocator, OsImpl, SlabAllocResult, SlabAllocator,
-    SlabDeallocResult,
-};
+use buddy_slab_allocator::{BuddyAllocator, GlobalAllocator, OsImpl, SlabAllocResult, SlabAllocator, SlabDeallocResult};
 use core::alloc::Layout;
 use rand::{rngs::StdRng, SeedableRng};
 use std::alloc::{alloc, dealloc};
@@ -32,39 +29,13 @@ impl HostRegion {
     pub fn addr(&self) -> usize {
         self.ptr as usize
     }
+
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        unsafe { core::slice::from_raw_parts_mut(self.ptr, self.layout.size()) }
+    }
 }
 
 impl Drop for HostRegion {
-    fn drop(&mut self) {
-        unsafe { dealloc(self.ptr, self.layout) };
-    }
-}
-
-pub struct MetadataBuf {
-    ptr: *mut u8,
-    layout: Layout,
-}
-
-impl MetadataBuf {
-    pub fn for_heap(heap_size: usize) -> Self {
-        let size = BuddyAllocator::<PAGE_SIZE>::required_meta_size(heap_size);
-        let align = core::mem::align_of::<PageMeta>().max(8);
-        let layout = Layout::from_size_align(size, align).unwrap();
-        let ptr = unsafe { alloc(layout) };
-        assert!(!ptr.is_null(), "failed to allocate metadata");
-        Self { ptr, layout }
-    }
-
-    pub fn ptr(&self) -> *mut u8 {
-        self.ptr
-    }
-
-    pub fn size(&self) -> usize {
-        self.layout.size()
-    }
-}
-
-impl Drop for MetadataBuf {
     fn drop(&mut self) {
         unsafe { dealloc(self.ptr, self.layout) };
     }
@@ -94,10 +65,6 @@ impl OsImpl for MockOs {
     fn virt_to_phys(&self, vaddr: usize) -> usize {
         vaddr
     }
-
-    fn phys_to_virt(&self, paddr: usize) -> usize {
-        paddr
-    }
 }
 
 pub static MOCK_OS: MockOs = MockOs::new();
@@ -107,49 +74,43 @@ pub fn seeded_rng() -> StdRng {
 }
 
 pub struct BuddyHarness {
-    _heap: HostRegion,
-    _meta: MetadataBuf,
+    _region: HostRegion,
     pub allocator: BuddyAllocator<PAGE_SIZE>,
 }
 
 impl BuddyHarness {
     pub fn new(heap_size: usize) -> Self {
-        let heap = HostRegion::new(heap_size);
-        let meta = MetadataBuf::for_heap(heap_size);
+        let region_size =
+            heap_size + BuddyAllocator::<PAGE_SIZE>::required_meta_size(heap_size) + PAGE_SIZE * 4;
+        let mut region = HostRegion::new(region_size);
         let mut allocator = BuddyAllocator::<PAGE_SIZE>::new();
         unsafe {
-            allocator
-                .init(meta.ptr(), meta.size(), heap.addr(), heap_size, None)
-                .unwrap();
+            allocator.init(region.as_mut_slice(), None).unwrap();
         }
         Self {
-            _heap: heap,
-            _meta: meta,
+            _region: region,
             allocator,
         }
     }
 }
 
 pub struct SlabHarness {
-    _heap: HostRegion,
-    _meta: MetadataBuf,
+    _region: HostRegion,
     buddy: BuddyAllocator<PAGE_SIZE>,
     slab: SlabAllocator<PAGE_SIZE>,
 }
 
 impl SlabHarness {
     pub fn new(heap_size: usize) -> Self {
-        let heap = HostRegion::new(heap_size);
-        let meta = MetadataBuf::for_heap(heap_size);
+        let region_size =
+            heap_size + BuddyAllocator::<PAGE_SIZE>::required_meta_size(heap_size) + PAGE_SIZE * 4;
+        let mut region = HostRegion::new(region_size);
         let mut buddy = BuddyAllocator::<PAGE_SIZE>::new();
         unsafe {
-            buddy
-                .init(meta.ptr(), meta.size(), heap.addr(), heap_size, None)
-                .unwrap();
+            buddy.init(region.as_mut_slice(), None).unwrap();
         }
         Self {
-            _heap: heap,
-            _meta: meta,
+            _region: region,
             buddy,
             slab: SlabAllocator::new(),
         }
@@ -185,13 +146,11 @@ pub struct GlobalHarness {
 
 impl GlobalHarness {
     pub fn new(region_size: usize, cpu_count: usize) -> Self {
-        let region = HostRegion::new(region_size);
+        let mut region = HostRegion::new(region_size);
         let allocator = GlobalAllocator::<PAGE_SIZE>::new();
         MOCK_OS.set_cpu(0);
         unsafe {
-            allocator
-                .init(region.addr(), region_size, cpu_count, &MOCK_OS)
-                .unwrap();
+            allocator.init(region.as_mut_slice(), cpu_count, &MOCK_OS).unwrap();
         }
         Self {
             _region: region,

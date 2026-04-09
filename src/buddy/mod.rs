@@ -28,6 +28,16 @@ struct RegionLayout {
     managed_heap_size: usize,
 }
 
+pub(crate) struct SectionInitSpec {
+    pub(crate) region_start: usize,
+    pub(crate) region_size: usize,
+    pub(crate) section_ptr: *mut BuddySection,
+    pub(crate) meta_ptr: *mut u8,
+    pub(crate) meta_size: usize,
+    pub(crate) heap_start: usize,
+    pub(crate) heap_size: usize,
+}
+
 /// Public read-only summary of a managed section.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ManagedSection {
@@ -305,32 +315,26 @@ impl<const PAGE_SIZE: usize> BuddyAllocator<PAGE_SIZE> {
         let region_size = region.len();
         let layout = BuddySection::compute_region_layout::<PAGE_SIZE>(region_start, region_size)
             .ok_or(AllocError::InvalidParam)?;
-        self.add_region_raw(
+        self.add_region_raw(SectionInitSpec {
             region_start,
             region_size,
-            layout.section_start as *mut BuddySection,
-            layout.meta_start as *mut u8,
-            Self::required_meta_size(layout.managed_heap_size),
-            layout.managed_heap_start,
-            layout.managed_heap_size,
-        )
+            section_ptr: layout.section_start as *mut BuddySection,
+            meta_ptr: layout.meta_start as *mut u8,
+            meta_size: Self::required_meta_size(layout.managed_heap_size),
+            heap_start: layout.managed_heap_start,
+            heap_size: layout.managed_heap_size,
+        })
     }
 
-    pub(crate) unsafe fn add_region_raw(
-        &mut self,
-        region_start: usize,
-        region_size: usize,
-        section_ptr: *mut BuddySection,
-        meta_ptr: *mut u8,
-        meta_size: usize,
-        heap_start: usize,
-        heap_size: usize,
-    ) -> AllocResult {
-        let region_end = region_start
+    pub(crate) unsafe fn add_region_raw(&mut self, spec: SectionInitSpec) -> AllocResult {
+        let region_size = spec.region_size;
+        let region_end = spec
+            .region_start
             .checked_add(region_size)
             .ok_or(AllocError::InvalidParam)?;
-        let heap_end = heap_start
-            .checked_add(heap_size)
+        let heap_end = spec
+            .heap_start
+            .checked_add(spec.heap_size)
             .ok_or(AllocError::InvalidParam)?;
         if heap_end > region_end {
             return Err(AllocError::InvalidParam);
@@ -343,37 +347,37 @@ impl<const PAGE_SIZE: usize> BuddyAllocator<PAGE_SIZE> {
                 .region_start
                 .checked_add(existing.region_size)
                 .ok_or(AllocError::InvalidParam)?;
-            if region_start < existing_end && existing.region_start < region_end {
+            if spec.region_start < existing_end && existing.region_start < region_end {
                 return Err(AllocError::MemoryOverlap);
             }
             section = existing.next;
         }
 
         BuddySection::init_at::<PAGE_SIZE>(
-            section_ptr,
-            region_start,
-            region_size,
-            meta_ptr,
-            meta_size,
-            heap_start,
-            heap_size,
+            spec.section_ptr,
+            spec.region_start,
+            spec.region_size,
+            spec.meta_ptr,
+            spec.meta_size,
+            spec.heap_start,
+            spec.heap_size,
         )?;
 
         if self.sections_head.is_null() {
-            self.sections_head = section_ptr;
+            self.sections_head = spec.section_ptr;
         } else {
-            (*self.sections_tail).next = section_ptr;
+            (*self.sections_tail).next = spec.section_ptr;
         }
-        self.sections_tail = section_ptr;
+        self.sections_tail = spec.section_ptr;
         self.section_count += 1;
 
         log::debug!(
             "BuddyAllocator: add section region {:#x}+{:#x}, heap {:#x}..{:#x}, {} pages",
-            region_start,
-            region_size,
-            heap_start,
+            spec.region_start,
+            spec.region_size,
+            spec.heap_start,
             heap_end,
-            heap_size / PAGE_SIZE,
+            spec.heap_size / PAGE_SIZE,
         );
 
         Ok(())
