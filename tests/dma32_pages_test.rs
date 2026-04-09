@@ -19,9 +19,6 @@ impl OsImpl for MockOs {
         // Map virtual addresses below 4 GiB so lowmem checks pass.
         vaddr & 0x0FFF_FFFF
     }
-    fn phys_to_virt(&self, paddr: usize) -> usize {
-        paddr
-    }
 }
 
 static MOCK_OS: MockOs = MockOs;
@@ -37,19 +34,16 @@ fn host_dealloc(ptr: *mut u8, layout: Layout) {
     unsafe { dealloc(ptr, layout) };
 }
 
-fn init_allocator(allocator: &GlobalAllocator<PAGE_SIZE>, region_addr: usize, region_size: usize) {
-    unsafe {
-        allocator
-            .init(region_addr, region_size, 1, &MOCK_OS)
-            .unwrap()
-    };
+fn init_allocator(allocator: &GlobalAllocator<PAGE_SIZE>, region: &mut [u8]) {
+    unsafe { allocator.init(region, 1, &MOCK_OS).unwrap() };
 }
 
 #[test]
 fn test_lowmem_basic() {
     let (region_ptr, region_layout) = host_alloc(TEST_HEAP_SIZE, PAGE_SIZE);
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    init_allocator(&allocator, region_ptr as usize, TEST_HEAP_SIZE);
+    let region = unsafe { core::slice::from_raw_parts_mut(region_ptr, TEST_HEAP_SIZE) };
+    init_allocator(&allocator, region);
     let managed_start = allocator.managed_heap_start();
     let managed_end = managed_start + allocator.managed_heap_size();
 
@@ -71,7 +65,8 @@ fn test_lowmem_basic() {
 fn test_lowmem_aligned() {
     let (region_ptr, region_layout) = host_alloc(TEST_HEAP_SIZE, PAGE_SIZE * 2);
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    init_allocator(&allocator, region_ptr as usize, TEST_HEAP_SIZE);
+    let region = unsafe { core::slice::from_raw_parts_mut(region_ptr, TEST_HEAP_SIZE) };
+    init_allocator(&allocator, region);
 
     let addr = allocator.alloc_pages_lowmem(1, 2 * PAGE_SIZE).unwrap();
     assert_eq!((addr - allocator.managed_heap_start()) % (2 * PAGE_SIZE), 0);
@@ -84,7 +79,8 @@ fn test_lowmem_aligned() {
 fn test_lowmem_vs_normal() {
     let (region_ptr, region_layout) = host_alloc(TEST_HEAP_SIZE, PAGE_SIZE);
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    init_allocator(&allocator, region_ptr as usize, TEST_HEAP_SIZE);
+    let region = unsafe { core::slice::from_raw_parts_mut(region_ptr, TEST_HEAP_SIZE) };
+    init_allocator(&allocator, region);
 
     let addr_low = allocator.alloc_pages_lowmem(1, PAGE_SIZE).unwrap();
     let addr_normal = allocator.alloc_pages(1, PAGE_SIZE).unwrap();
@@ -102,7 +98,8 @@ fn test_lowmem_vs_normal() {
 fn test_lowmem_stress() {
     let (region_ptr, region_layout) = host_alloc(TEST_HEAP_SIZE, PAGE_SIZE);
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    init_allocator(&allocator, region_ptr as usize, TEST_HEAP_SIZE);
+    let region = unsafe { core::slice::from_raw_parts_mut(region_ptr, TEST_HEAP_SIZE) };
+    init_allocator(&allocator, region);
 
     let mut addrs = Vec::new();
     for _ in 0..32 {

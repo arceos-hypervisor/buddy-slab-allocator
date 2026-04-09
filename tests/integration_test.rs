@@ -41,9 +41,6 @@ impl OsImpl for TestOs {
     fn virt_to_phys(&self, vaddr: usize) -> usize {
         vaddr // identity mapping
     }
-    fn phys_to_virt(&self, paddr: usize) -> usize {
-        paddr
-    }
 }
 
 static TEST_OS: TestOs = TestOs::new();
@@ -360,17 +357,8 @@ fn slab_all_size_classes() {
 // Global allocator tests
 // ======================================================================
 
-fn init_global(
-    allocator: &GlobalAllocator<PAGE_SIZE>,
-    region_start: usize,
-    region_size: usize,
-    cpu_count: usize,
-) {
-    unsafe {
-        allocator
-            .init(region_start, region_size, cpu_count, &TEST_OS)
-            .unwrap()
-    };
+fn init_global(allocator: &GlobalAllocator<PAGE_SIZE>, region: &mut [u8], cpu_count: usize) {
+    unsafe { allocator.init(region, cpu_count, &TEST_OS).unwrap() };
 }
 
 #[test]
@@ -378,7 +366,8 @@ fn global_page_alloc() {
     let (region_ptr, region_layout) = host_alloc(TEST_HEAP_SIZE, PAGE_SIZE * 4);
     let region_addr = region_ptr as usize;
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    init_global(&allocator, region_addr, TEST_HEAP_SIZE, 1);
+    let region = unsafe { core::slice::from_raw_parts_mut(region_ptr, TEST_HEAP_SIZE) };
+    init_global(&allocator, region, 1);
 
     let managed_start = allocator.managed_heap_start();
     let managed_end = managed_start + allocator.managed_heap_size();
@@ -396,7 +385,8 @@ fn global_page_alloc() {
 fn global_small_alloc() {
     let (region_ptr, region_layout) = host_alloc(TEST_HEAP_SIZE, PAGE_SIZE * 4);
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    init_global(&allocator, region_ptr as usize, TEST_HEAP_SIZE, 1);
+    let region = unsafe { core::slice::from_raw_parts_mut(region_ptr, TEST_HEAP_SIZE) };
+    init_global(&allocator, region, 1);
 
     let layout = Layout::from_size_align(64, 8).unwrap();
     let ptr = allocator.alloc(layout).unwrap();
@@ -409,7 +399,8 @@ fn global_small_alloc() {
 fn global_large_alloc() {
     let (region_ptr, region_layout) = host_alloc(TEST_HEAP_SIZE, PAGE_SIZE * 4);
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    init_global(&allocator, region_ptr as usize, TEST_HEAP_SIZE, 1);
+    let region = unsafe { core::slice::from_raw_parts_mut(region_ptr, TEST_HEAP_SIZE) };
+    init_global(&allocator, region, 1);
 
     let layout = Layout::from_size_align(8192, PAGE_SIZE).unwrap();
     let ptr = allocator.alloc(layout).unwrap();
@@ -422,7 +413,8 @@ fn global_large_alloc() {
 fn global_mixed_alloc() {
     let (region_ptr, region_layout) = host_alloc(TEST_HEAP_SIZE, PAGE_SIZE * 4);
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    init_global(&allocator, region_ptr as usize, TEST_HEAP_SIZE, 1);
+    let region = unsafe { core::slice::from_raw_parts_mut(region_ptr, TEST_HEAP_SIZE) };
+    init_global(&allocator, region, 1);
 
     let sizes: &[(usize, usize)] = &[
         (8, 8),
@@ -448,7 +440,8 @@ fn global_mixed_alloc() {
 fn global_cross_cpu_free() {
     let (region_ptr, region_layout) = host_alloc(TEST_HEAP_SIZE, PAGE_SIZE * 4);
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    init_global(&allocator, region_ptr as usize, TEST_HEAP_SIZE, 2);
+    let region = unsafe { core::slice::from_raw_parts_mut(region_ptr, TEST_HEAP_SIZE) };
+    init_global(&allocator, region, 2);
 
     // Allocate on CPU 0
     TEST_OS.set_cpu(0);
@@ -476,7 +469,8 @@ fn global_cross_cpu_free() {
 fn global_cross_cpu_free_drains_remote_queue() {
     let (region_ptr, region_layout) = host_alloc(TEST_HEAP_SIZE, PAGE_SIZE * 4);
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    init_global(&allocator, region_ptr as usize, TEST_HEAP_SIZE, 2);
+    let region = unsafe { core::slice::from_raw_parts_mut(region_ptr, TEST_HEAP_SIZE) };
+    init_global(&allocator, region, 2);
 
     TEST_OS.set_cpu(0);
     let layout = Layout::from_size_align(64, 8).unwrap();
@@ -509,7 +503,8 @@ fn global_cross_cpu_free_drains_remote_queue() {
 fn global_cross_cpu_free_multiple_rounds_same_slab() {
     let (region_ptr, region_layout) = host_alloc(TEST_HEAP_SIZE, PAGE_SIZE * 4);
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    init_global(&allocator, region_ptr as usize, TEST_HEAP_SIZE, 2);
+    let region = unsafe { core::slice::from_raw_parts_mut(region_ptr, TEST_HEAP_SIZE) };
+    init_global(&allocator, region, 2);
 
     let layout = Layout::from_size_align(64, 8).unwrap();
 
@@ -568,20 +563,13 @@ fn global_lowmem_pages() {
         fn virt_to_phys(&self, vaddr: usize) -> usize {
             vaddr & 0x0FFF_FFFF
         }
-        fn phys_to_virt(&self, paddr: usize) -> usize {
-            paddr
-        }
     }
     static LOWMEM_OS: LowmemOs = LowmemOs;
 
     let (region_ptr, region_layout) = host_alloc(TEST_HEAP_SIZE, PAGE_SIZE * 4);
-    let region_addr = region_ptr as usize;
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    unsafe {
-        allocator
-            .init(region_addr, TEST_HEAP_SIZE, 1, &LOWMEM_OS)
-            .unwrap()
-    };
+    let region = unsafe { core::slice::from_raw_parts_mut(region_ptr, TEST_HEAP_SIZE) };
+    unsafe { allocator.init(region, 1, &LOWMEM_OS).unwrap() };
 
     let addr = allocator.alloc_pages_lowmem(1, PAGE_SIZE).unwrap();
     assert!(addr >= allocator.managed_heap_start());
@@ -596,7 +584,9 @@ fn global_unaligned_region_start() {
     let region_start = region_ptr as usize + 1;
     let region_size = TEST_HEAP_SIZE;
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    init_global(&allocator, region_start, region_size, 1);
+    let region =
+        unsafe { core::slice::from_raw_parts_mut(region_ptr.wrapping_add(1), region_size) };
+    init_global(&allocator, region, 1);
 
     let managed_start = allocator.managed_heap_start();
     let managed_end = managed_start + allocator.managed_heap_size();
@@ -621,8 +611,9 @@ fn global_rejects_region_without_one_managed_page() {
     let region_size = PAGE_SIZE + slab_offset + slab_size - 1;
     let (region_ptr, region_layout) = host_alloc(region_size, PAGE_SIZE);
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
+    let region = unsafe { core::slice::from_raw_parts_mut(region_ptr, region_size) };
 
-    let err = unsafe { allocator.init(region_ptr as usize, region_size, 1, &TEST_OS) }.unwrap_err();
+    let err = unsafe { allocator.init(region, 1, &TEST_OS) }.unwrap_err();
     assert_eq!(err, AllocError::InvalidParam);
 
     host_dealloc(region_ptr, region_layout);

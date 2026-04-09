@@ -23,7 +23,7 @@ classDiagram
         -UsageStatsAtomic stats
         -AtomicBool initialized
         +new() GlobalAllocator
-        +init(region_start, region_size, cpu_count, os) AllocResult
+        +init(region, cpu_count, os) AllocResult
         +add_memory_region(start, size) AllocResult
         +alloc(Layout) Option~NonNull~u8~~
         +dealloc(ptr, Layout)
@@ -245,19 +245,17 @@ struct DemoOs;
 impl OsImpl for DemoOs {
     fn current_cpu_idx(&self) -> usize { 0 }
     fn virt_to_phys(&self, vaddr: usize) -> usize { vaddr }
-    fn phys_to_virt(&self, paddr: usize) -> usize { paddr }
 }
 
 static OS: DemoOs = DemoOs;
 
 let allocator = GlobalAllocator::<PAGE_SIZE>::new();
-let region_start = 0x8000_0000;
+let region_start = 0x8000_0000 as *mut u8;
 let region_size = 16 * 1024 * 1024;
+let region = unsafe { core::slice::from_raw_parts_mut(region_start, region_size) };
 
 unsafe {
-    allocator
-        .init(region_start, region_size, 1, &OS)
-        .unwrap();
+    allocator.init(region, 1, &OS).unwrap();
 }
 
 let layout = Layout::from_size_align(64, 8).unwrap();

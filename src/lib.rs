@@ -35,9 +35,6 @@ pub trait OsImpl: Sync + Send {
 
     /// Translate a virtual address to a physical address.
     fn virt_to_phys(&self, vaddr: usize) -> usize;
-
-    /// Translate a physical address to a virtual address.
-    fn phys_to_virt(&self, paddr: usize) -> usize;
 }
 
 // ---------------------------------------------------------------------------

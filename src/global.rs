@@ -171,22 +171,22 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
     /// Initialise the allocator.
     ///
     /// # Arguments
-    /// - `region_start` / `region_size` — total writable region to reserve for this allocator.
+    /// - `region` — total writable region to reserve for this allocator.
     ///   The allocator carves metadata from the region prefix and manages the remaining tail.
     /// - `cpu_count` — number of CPUs (≥ 1).
     /// - `os` — platform abstraction.
     ///
     /// # Safety
-    /// - `region_start..region_start + region_size` must be writable and remain valid for the
-    ///   lifetime of this allocator.
+    /// - `region` must be writable and remain valid for the lifetime of this allocator.
     /// - Any bytes consumed by metadata or alignment padding become unavailable for allocation.
     pub unsafe fn init(
         &self,
-        region_start: usize,
-        region_size: usize,
+        region: &mut [u8],
         cpu_count: usize,
         os: &'static dyn OsImpl,
     ) -> AllocResult {
+        let region_start = region.as_mut_ptr() as usize;
+        let region_size = region.len();
         let layout = Self::compute_region_layout(region_start, region_size, cpu_count)
             .ok_or(AllocError::InvalidParam)?;
         let meta_ptr = layout.meta_start as *mut u8;

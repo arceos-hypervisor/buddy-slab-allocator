@@ -31,9 +31,6 @@ impl OsImpl for MockOs {
     fn virt_to_phys(&self, vaddr: usize) -> usize {
         vaddr
     }
-    fn phys_to_virt(&self, paddr: usize) -> usize {
-        paddr
-    }
 }
 
 static MOCK_OS: MockOs = MockOs::new();
@@ -51,8 +48,8 @@ impl TestHeap {
         Self { ptr, layout }
     }
 
-    fn addr(&self) -> usize {
-        self.ptr as usize
+    fn as_region(&mut self) -> &mut [u8] {
+        unsafe { core::slice::from_raw_parts_mut(self.ptr, self.layout.size()) }
     }
 }
 
@@ -62,11 +59,11 @@ impl Drop for TestHeap {
     }
 }
 
-fn init_allocator(allocator: &GlobalAllocator<PAGE_SIZE>, heap: &TestHeap, cpu_count: usize) {
+fn init_allocator(allocator: &GlobalAllocator<PAGE_SIZE>, heap: &mut TestHeap, cpu_count: usize) {
     MOCK_OS.set_cpu(0);
     unsafe {
         allocator
-            .init(heap.addr(), HEAP_SIZE, cpu_count, &MOCK_OS)
+            .init(heap.as_region(), cpu_count, &MOCK_OS)
             .unwrap()
     };
 }
@@ -74,9 +71,9 @@ fn init_allocator(allocator: &GlobalAllocator<PAGE_SIZE>, heap: &TestHeap, cpu_c
 #[test]
 #[ignore = "stress test"]
 fn stress_random_mixed_alloc_free() {
-    let heap = TestHeap::new(HEAP_SIZE);
+    let mut heap = TestHeap::new(HEAP_SIZE);
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    init_allocator(&allocator, &heap, 2);
+    init_allocator(&allocator, &mut heap, 2);
     let mut rng = rand::rngs::StdRng::from_seed([0; 32]);
     let mut allocated: Vec<(core::ptr::NonNull<u8>, Layout)> = Vec::new();
 
@@ -109,9 +106,9 @@ fn stress_random_mixed_alloc_free() {
 #[test]
 #[ignore = "stress test"]
 fn stress_exhaustion_recovery() {
-    let heap = TestHeap::new(HEAP_SIZE);
+    let mut heap = TestHeap::new(HEAP_SIZE);
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    init_allocator(&allocator, &heap, 1);
+    init_allocator(&allocator, &mut heap, 1);
     let layout = Layout::from_size_align(PAGE_SIZE, PAGE_SIZE).unwrap();
     let mut allocated = Vec::new();
 
@@ -138,9 +135,9 @@ fn stress_exhaustion_recovery() {
 #[test]
 #[ignore = "stress test"]
 fn stress_fragmentation_recovery() {
-    let heap = TestHeap::new(HEAP_SIZE);
+    let mut heap = TestHeap::new(HEAP_SIZE);
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    init_allocator(&allocator, &heap, 2);
+    init_allocator(&allocator, &mut heap, 2);
     let small_layout = Layout::from_size_align(64, 8).unwrap();
     let mut small_ptrs = Vec::new();
 
