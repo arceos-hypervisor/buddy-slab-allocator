@@ -15,7 +15,11 @@ use crate::slab::size_class::{SLAB_MAX_SIZE, SizeClass};
 use crate::slab::{SlabAllocResult, SlabAllocator, SlabDeallocResult};
 use crate::{OsImpl, align_up};
 
+const REGION_GRANULE: usize = 2 * 1024 * 1024;
+
 struct InitialRegionLayout {
+    region_start: usize,
+    region_size: usize,
     section_start: usize,
     meta_start: usize,
     meta_size: usize,
@@ -68,7 +72,7 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
         section_start: usize,
         meta_size: usize,
     ) -> Option<usize> {
-        let managed_heap_start = align_up(section_start.checked_add(meta_size)?, PAGE_SIZE);
+        let managed_heap_start = align_up(section_start.checked_add(meta_size)?, REGION_GRANULE);
         if managed_heap_start > region_end {
             return Some(0);
         }
@@ -139,10 +143,12 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
             meta_offset.checked_add(buddy_meta_size)?,
             core::mem::align_of::<SpinMutex<SlabAllocator<PAGE_SIZE>>>(),
         );
-        let managed_heap_start = align_up(section_start.checked_add(meta_size)?, PAGE_SIZE);
+        let managed_heap_start = align_up(section_start.checked_add(meta_size)?, REGION_GRANULE);
         let managed_heap_size = low.checked_mul(PAGE_SIZE)?;
 
         Some(InitialRegionLayout {
+            region_start,
+            region_size,
             section_start,
             meta_start,
             meta_size,
@@ -184,10 +190,11 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
         os: &'static dyn OsImpl,
     ) -> AllocResult {
         unsafe {
-            let region_start = region.as_mut_ptr() as usize;
-            let region_size = region.len();
-            let layout = Self::compute_initial_region_layout(region_start, region_size, cpu_count)
-                .ok_or(AllocError::InvalidParam)?;
+            let raw_region_start = region.as_mut_ptr() as usize;
+            let raw_region_size = region.len();
+            let layout =
+                Self::compute_initial_region_layout(raw_region_start, raw_region_size, cpu_count)
+                    .ok_or(AllocError::InvalidParam)?;
             let section_ptr = layout.section_start as *mut BuddySection;
             let meta_ptr = layout.meta_start as *mut u8;
             let slab_ptr = (layout.section_start + layout.slab_offset)
@@ -196,8 +203,8 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
             let mut buddy = self.buddy.lock();
             buddy.reset(Some(os));
             buddy.add_region_raw(SectionInitSpec {
-                region_start,
-                region_size,
+                region_start: layout.region_start,
+                region_size: layout.region_size,
                 section_ptr,
                 meta_ptr,
                 meta_size: layout.buddy_meta_size,
@@ -220,8 +227,8 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
             log::debug!(
                 "GlobalAllocator: {} CPUs, region {:#x}+{:#x}, meta {:#x}+{:#x}, first heap {:#x}+{:#x}",
                 cpu_count,
-                region_start,
-                region_size,
+                layout.region_start,
+                layout.region_size,
                 layout.section_start,
                 layout.meta_size,
                 layout.managed_heap_start,
@@ -242,7 +249,32 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
             if !self.initialized.load(Ordering::Acquire) {
                 return Err(AllocError::NotInitialized);
             }
-            self.buddy.lock().add_region(region)
+            let region_start = region.as_mut_ptr() as usize;
+            let region_size = region.len();
+            let Some(layout) = BuddySection::compute_region_layout_with_heap_align::<PAGE_SIZE>(
+                region_start,
+                region_size,
+                REGION_GRANULE,
+            ) else {
+                log::debug!(
+                    "GlobalAllocator: skip region {:#x}+{:#x}, no allocator-visible memory after {} alignment",
+                    region_start,
+                    region_size,
+                    REGION_GRANULE,
+                );
+                return Ok(());
+            };
+            self.buddy.lock().add_region_raw(SectionInitSpec {
+                region_start,
+                region_size,
+                section_ptr: layout.section_start as *mut BuddySection,
+                meta_ptr: layout.meta_start as *mut u8,
+                meta_size: BuddyAllocator::<PAGE_SIZE>::required_meta_size(
+                    layout.managed_heap_size,
+                ),
+                heap_start: layout.managed_heap_start,
+                heap_size: layout.managed_heap_size,
+            })
         }
     }
 

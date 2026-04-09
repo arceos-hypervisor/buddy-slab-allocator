@@ -13,7 +13,7 @@ use core::ptr;
 
 use crate::error::{AllocError, AllocResult};
 use crate::{OsImpl, align_up, is_aligned};
-use page_meta::{free_list_pop, free_list_push, free_list_remove};
+use page_meta::{free_list_push, free_list_remove};
 
 /// Maximum buddy order. With 4 KiB pages this gives 2^20 × 4 KiB = 4 GiB blocks.
 pub const MAX_ORDER: usize = 20;
@@ -21,11 +21,28 @@ pub const MAX_ORDER: usize = 20;
 /// DMA32 zone upper bound (4 GiB physical).
 const DMA32_LIMIT: usize = 0x1_0000_0000;
 
-struct RegionLayout {
-    section_start: usize,
-    meta_start: usize,
-    managed_heap_start: usize,
-    managed_heap_size: usize,
+fn normalize_region(
+    region_start: usize,
+    region_size: usize,
+    granule: usize,
+) -> Option<(usize, usize)> {
+    if region_size == 0 || !granule.is_power_of_two() {
+        return None;
+    }
+    let region_end = region_start.checked_add(region_size)?;
+    let usable_start = align_up(region_start, granule);
+    let usable_end = region_end & !(granule - 1);
+    if usable_end <= usable_start {
+        return None;
+    }
+    Some((usable_start, usable_end - usable_start))
+}
+
+pub(crate) struct RegionLayout {
+    pub(crate) section_start: usize,
+    pub(crate) meta_start: usize,
+    pub(crate) managed_heap_start: usize,
+    pub(crate) managed_heap_size: usize,
 }
 
 pub(crate) struct SectionInitSpec {
@@ -87,8 +104,9 @@ impl BuddySection {
         region_end: usize,
         section_start: usize,
         meta_size: usize,
+        heap_align: usize,
     ) -> Option<usize> {
-        let managed_heap_start = align_up(section_start.checked_add(meta_size)?, PAGE_SIZE);
+        let managed_heap_start = align_up(section_start.checked_add(meta_size)?, heap_align);
         if managed_heap_start > region_end {
             return Some(0);
         }
@@ -99,23 +117,28 @@ impl BuddySection {
         region_end: usize,
         section_start: usize,
         pages: usize,
+        heap_align: usize,
     ) -> bool {
         let Some((_, meta_size)) = Self::metadata_layout_for_pages(pages) else {
             return false;
         };
-        let Some(available_pages) =
-            Self::available_heap_pages::<PAGE_SIZE>(region_end, section_start, meta_size)
-        else {
+        let Some(available_pages) = Self::available_heap_pages::<PAGE_SIZE>(
+            region_end,
+            section_start,
+            meta_size,
+            heap_align,
+        ) else {
             return false;
         };
         available_pages >= pages
     }
 
-    fn compute_region_layout<const PAGE_SIZE: usize>(
+    pub(crate) fn compute_region_layout_with_heap_align<const PAGE_SIZE: usize>(
         region_start: usize,
         region_size: usize,
+        heap_align: usize,
     ) -> Option<RegionLayout> {
-        if region_size == 0 || !PAGE_SIZE.is_power_of_two() {
+        if region_size == 0 || !PAGE_SIZE.is_power_of_two() || !heap_align.is_power_of_two() {
             return None;
         }
 
@@ -139,7 +162,7 @@ impl BuddySection {
         let mut high = max_pages;
         while low < high {
             let mid = low + (high - low).div_ceil(2);
-            if Self::can_manage_pages::<PAGE_SIZE>(region_end, section_start, mid) {
+            if Self::can_manage_pages::<PAGE_SIZE>(region_end, section_start, mid, heap_align) {
                 low = mid;
             } else {
                 high = mid - 1;
@@ -152,7 +175,7 @@ impl BuddySection {
 
         let (meta_offset, meta_size) = Self::metadata_layout_for_pages(low)?;
         let meta_start = section_start.checked_add(meta_offset)?;
-        let managed_heap_start = align_up(section_start.checked_add(meta_size)?, PAGE_SIZE);
+        let managed_heap_start = align_up(section_start.checked_add(meta_size)?, heap_align);
         let managed_heap_size = low.checked_mul(PAGE_SIZE)?;
 
         Some(RegionLayout {
@@ -161,6 +184,17 @@ impl BuddySection {
             managed_heap_start,
             managed_heap_size,
         })
+    }
+
+    fn compute_region_layout<const PAGE_SIZE: usize>(
+        region_start: usize,
+        region_size: usize,
+    ) -> Option<RegionLayout> {
+        Self::compute_region_layout_with_heap_align::<PAGE_SIZE>(
+            region_start,
+            region_size,
+            PAGE_SIZE,
+        )
     }
 
     unsafe fn init_at<const PAGE_SIZE: usize>(
@@ -318,6 +352,9 @@ impl<const PAGE_SIZE: usize> BuddyAllocator<PAGE_SIZE> {
         unsafe {
             let region_start = region.as_mut_ptr() as usize;
             let region_size = region.len();
+            let (region_start, region_size) =
+                normalize_region(region_start, region_size, PAGE_SIZE)
+                    .ok_or(AllocError::InvalidParam)?;
             let layout =
                 BuddySection::compute_region_layout::<PAGE_SIZE>(region_start, region_size)
                     .ok_or(AllocError::InvalidParam)?;
@@ -471,12 +508,11 @@ impl<const PAGE_SIZE: usize> BuddyAllocator<PAGE_SIZE> {
             return Err(AllocError::InvalidParam);
         }
 
-        let align_order = (align / PAGE_SIZE).trailing_zeros() as usize;
-        let effective_order = order.max(align_order);
-
         let mut section = self.sections_head;
         while !section.is_null() {
-            if let Ok(addr) = unsafe { Self::alloc_from_section(&mut *section, effective_order) } {
+            if let Ok(addr) =
+                unsafe { Self::alloc_from_section_aligned(&mut *section, order, align) }
+            {
                 return Ok(addr);
             }
             section = unsafe { (*section).next };
@@ -485,46 +521,101 @@ impl<const PAGE_SIZE: usize> BuddyAllocator<PAGE_SIZE> {
         Err(AllocError::NoMemory)
     }
 
-    fn alloc_from_section(section: &mut BuddySection, order: usize) -> AllocResult<usize> {
-        let mut found_order = order;
-        while found_order <= MAX_ORDER {
-            if section.free_lists[found_order] != PFN_NONE {
-                break;
+    fn alloc_from_section_aligned(
+        section: &mut BuddySection,
+        order: usize,
+        align: usize,
+    ) -> AllocResult<usize> {
+        for search_order in order..=MAX_ORDER {
+            let mut pfn_u32 = section.free_lists[search_order];
+            while pfn_u32 != PFN_NONE {
+                let block_pfn = pfn_u32 as usize;
+                if let Some(target_pfn) = Self::find_aligned_pfn_in_block(
+                    section.heap_start,
+                    block_pfn,
+                    search_order,
+                    order,
+                    align,
+                ) {
+                    unsafe {
+                        free_list_remove(
+                            section.meta,
+                            &mut section.free_lists,
+                            pfn_u32,
+                            search_order,
+                        );
+                    }
+
+                    let mut current_order = search_order;
+                    let mut current_pfn = block_pfn;
+                    while current_order > order {
+                        current_order -= 1;
+                        let left_pfn = current_pfn;
+                        let right_pfn = current_pfn + (1 << current_order);
+                        let (next_pfn, free_pfn) = if target_pfn >= right_pfn {
+                            (right_pfn, left_pfn)
+                        } else {
+                            (left_pfn, right_pfn)
+                        };
+                        unsafe {
+                            let bm = &mut *section.meta.add(free_pfn);
+                            bm.flags = PageFlags::Free;
+                            bm.order = current_order as u8;
+                            free_list_push(
+                                section.meta,
+                                &mut section.free_lists,
+                                free_pfn as u32,
+                                current_order,
+                            );
+                        }
+                        current_pfn = next_pfn;
+                    }
+
+                    unsafe {
+                        let m = &mut *section.meta.add(current_pfn);
+                        m.flags = PageFlags::Allocated;
+                        m.order = order as u8;
+                    }
+
+                    section.free_pages -= 1 << order;
+                    return Ok(section.heap_start + current_pfn * PAGE_SIZE);
+                }
+                pfn_u32 = unsafe { (*section.meta.add(pfn_u32 as usize)).next };
             }
-            found_order += 1;
-        }
-        if found_order > MAX_ORDER {
-            return Err(AllocError::NoMemory);
         }
 
-        let pfn = unsafe { free_list_pop(section.meta, &mut section.free_lists, found_order) };
-        debug_assert_ne!(pfn, PFN_NONE);
+        Err(AllocError::NoMemory)
+    }
 
-        let mut current_order = found_order;
-        while current_order > order {
-            current_order -= 1;
-            let buddy_pfn = pfn as usize + (1 << current_order);
-            unsafe {
-                let bm = &mut *section.meta.add(buddy_pfn);
-                bm.flags = PageFlags::Free;
-                bm.order = current_order as u8;
-                free_list_push(
-                    section.meta,
-                    &mut section.free_lists,
-                    buddy_pfn as u32,
-                    current_order,
-                );
+    fn find_aligned_pfn_in_block(
+        heap_start: usize,
+        block_pfn: usize,
+        block_order: usize,
+        alloc_order: usize,
+        align: usize,
+    ) -> Option<usize> {
+        let subblock_pages = 1usize << alloc_order;
+        let align_pages = align / PAGE_SIZE;
+        let heap_page_offset = (heap_start / PAGE_SIZE) & (align_pages - 1);
+        let offset = (align_pages - heap_page_offset) & (align_pages - 1);
+
+        let candidate = if align_pages <= subblock_pages {
+            if !heap_start.is_multiple_of(align) {
+                return None;
             }
-        }
+            block_pfn
+        } else {
+            if !offset.is_multiple_of(subblock_pages) {
+                return None;
+            }
+            let rem = block_pfn & (align_pages - 1);
+            let delta = (offset + align_pages - rem) & (align_pages - 1);
+            block_pfn + delta
+        };
 
-        unsafe {
-            let m = &mut *section.meta.add(pfn as usize);
-            m.flags = PageFlags::Allocated;
-            m.order = order as u8;
-        }
-
-        section.free_pages -= 1 << order;
-        Ok(section.heap_start + (pfn as usize) * PAGE_SIZE)
+        let block_pages = 1usize << block_order;
+        let last_start = block_pfn + block_pages - subblock_pages;
+        (candidate <= last_start).then_some(candidate)
     }
 
     /// Allocate pages whose *physical* address is below 4 GiB (DMA32 zone).
@@ -540,16 +631,14 @@ impl<const PAGE_SIZE: usize> BuddyAllocator<PAGE_SIZE> {
         }
 
         let order = count.next_power_of_two().trailing_zeros() as usize;
-        let align_order = (align / PAGE_SIZE).trailing_zeros() as usize;
-        let effective_order = order.max(align_order);
-        if effective_order > MAX_ORDER {
+        if order > MAX_ORDER {
             return Err(AllocError::InvalidParam);
         }
 
         let mut section = self.sections_head;
         while !section.is_null() {
             if let Ok(addr) =
-                unsafe { Self::alloc_lowmem_from_section(&mut *section, effective_order, os) }
+                unsafe { Self::alloc_lowmem_from_section(&mut *section, order, align, os) }
             {
                 return Ok(addr);
             }
@@ -561,16 +650,28 @@ impl<const PAGE_SIZE: usize> BuddyAllocator<PAGE_SIZE> {
 
     fn alloc_lowmem_from_section(
         section: &mut BuddySection,
-        effective_order: usize,
+        alloc_order: usize,
+        align: usize,
         os: &'static dyn OsImpl,
     ) -> AllocResult<usize> {
-        for search_order in effective_order..=MAX_ORDER {
+        for search_order in alloc_order..=MAX_ORDER {
             let mut pfn_u32 = section.free_lists[search_order];
             while pfn_u32 != PFN_NONE {
-                let addr = section.heap_start + (pfn_u32 as usize) * PAGE_SIZE;
+                let block_pfn = pfn_u32 as usize;
+                let Some(target_pfn) = Self::find_aligned_pfn_in_block(
+                    section.heap_start,
+                    block_pfn,
+                    search_order,
+                    alloc_order,
+                    align,
+                ) else {
+                    pfn_u32 = unsafe { (*section.meta.add(pfn_u32 as usize)).next };
+                    continue;
+                };
+                let addr = section.heap_start + target_pfn * PAGE_SIZE;
                 let phys = os.virt_to_phys(addr);
-                let block_bytes = (1usize << search_order) * PAGE_SIZE;
-                if phys + block_bytes <= DMA32_LIMIT {
+                let block_bytes = (1usize << alloc_order) * PAGE_SIZE;
+                if phys + block_bytes <= DMA32_LIMIT && addr.is_multiple_of(align) {
                     unsafe {
                         free_list_remove(
                             section.meta,
@@ -581,28 +682,36 @@ impl<const PAGE_SIZE: usize> BuddyAllocator<PAGE_SIZE> {
                     }
 
                     let mut current_order = search_order;
-                    while current_order > effective_order {
+                    let mut current_pfn = block_pfn;
+                    while current_order > alloc_order {
                         current_order -= 1;
-                        let buddy_pfn = pfn_u32 as usize + (1 << current_order);
+                        let left_pfn = current_pfn;
+                        let right_pfn = current_pfn + (1 << current_order);
+                        let (next_pfn, free_pfn) = if target_pfn >= right_pfn {
+                            (right_pfn, left_pfn)
+                        } else {
+                            (left_pfn, right_pfn)
+                        };
                         unsafe {
-                            let bm = &mut *section.meta.add(buddy_pfn);
+                            let bm = &mut *section.meta.add(free_pfn);
                             bm.flags = PageFlags::Free;
                             bm.order = current_order as u8;
                             free_list_push(
                                 section.meta,
                                 &mut section.free_lists,
-                                buddy_pfn as u32,
+                                free_pfn as u32,
                                 current_order,
                             );
                         }
+                        current_pfn = next_pfn;
                     }
 
                     unsafe {
-                        let m = &mut *section.meta.add(pfn_u32 as usize);
+                        let m = &mut *section.meta.add(current_pfn);
                         m.flags = PageFlags::Allocated;
-                        m.order = effective_order as u8;
+                        m.order = alloc_order as u8;
                     }
-                    section.free_pages -= 1 << effective_order;
+                    section.free_pages -= 1 << alloc_order;
                     return Ok(addr);
                 }
                 pfn_u32 = unsafe { (*section.meta.add(pfn_u32 as usize)).next };

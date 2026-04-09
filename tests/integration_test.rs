@@ -32,8 +32,33 @@ fn init_buddy(
     buddy.section(0).unwrap()
 }
 
+fn init_buddy_with_heap_alignment(
+    buddy: &mut BuddyAllocator<PAGE_SIZE>,
+    region: &mut HostRegion,
+    os: Option<&'static dyn buddy_slab_allocator::OsImpl>,
+    heap_align: usize,
+) -> ManagedSection {
+    for offset in (0..heap_align).step_by(PAGE_SIZE) {
+        if region.len() <= offset {
+            break;
+        }
+        let slice = unsafe { region.subslice(offset, region.len() - offset) };
+        if unsafe { buddy.init(slice, os) }.is_ok() {
+            let section = buddy.section(0).unwrap();
+            if section.start % heap_align == 0 {
+                return section;
+            }
+        }
+    }
+    panic!("failed to find test region with heap alignment {heap_align:#x}");
+}
+
 fn primary_section(allocator: &GlobalAllocator<PAGE_SIZE>) -> ManagedSection {
     allocator.managed_section(0).unwrap()
+}
+
+fn irregular_region(size: usize, offset: usize, trim: usize, host_align: usize) -> HostRegion {
+    HostRegion::new(size + offset + trim + PAGE_SIZE, host_align)
 }
 
 // ======================================================================
@@ -62,26 +87,80 @@ fn buddy_basic_alloc_dealloc() {
 #[test]
 fn buddy_alignment() {
     // Heap must be aligned to the highest alignment we test (PAGE_SIZE * 4)
-    let mut region = HostRegion::new(buddy_region_size(TEST_HEAP_SIZE), PAGE_SIZE * 4);
+    let mut region = HostRegion::new(
+        buddy_region_size(TEST_HEAP_SIZE) + PAGE_SIZE * 4,
+        PAGE_SIZE * 4,
+    );
     let mut buddy = BuddyAllocator::<PAGE_SIZE>::new();
-    let section = init_buddy(&mut buddy, &mut region, None);
+    let _section = init_buddy_with_heap_alignment(&mut buddy, &mut region, None, PAGE_SIZE * 4);
 
     let addr2 = buddy.alloc_pages(1, PAGE_SIZE * 2).unwrap();
-    assert_eq!((addr2 - section.start) % (PAGE_SIZE * 2), 0);
+    assert_eq!(addr2 % (PAGE_SIZE * 2), 0);
 
     let addr4 = buddy.alloc_pages(1, PAGE_SIZE * 4).unwrap();
-    assert_eq!((addr4 - section.start) % (PAGE_SIZE * 4), 0);
+    assert_eq!(addr4 % (PAGE_SIZE * 4), 0);
 
     buddy.dealloc_pages(addr2, 1);
     buddy.dealloc_pages(addr4, 1);
 }
 
 #[test]
+fn buddy_add_region_unaligned_start_preserves_4k_alignment() {
+    const ALIGN_2M: usize = 2 * 1024 * 1024;
+    let mut first = HostRegion::new(buddy_region_size(32 * PAGE_SIZE) + ALIGN_2M, ALIGN_2M);
+    let mut second = irregular_region(
+        buddy_region_size(64 * PAGE_SIZE),
+        0x1234,
+        PAGE_SIZE / 3,
+        2 * 1024 * 1024,
+    );
+    let mut buddy = BuddyAllocator::<PAGE_SIZE>::new();
+    let _first_section = init_buddy_with_heap_alignment(&mut buddy, &mut first, None, ALIGN_2M);
+
+    let second_len = second.len();
+    let second_slice = unsafe { second.subslice(0x1234, second_len - 0x1234 - PAGE_SIZE / 3) };
+
+    unsafe { buddy.add_region(second_slice).unwrap() };
+
+    let addr = buddy.alloc_pages(1, PAGE_SIZE).unwrap();
+    assert_eq!(addr % PAGE_SIZE, 0);
+    buddy.dealloc_pages(addr, 1);
+}
+
+#[test]
+fn buddy_add_region_unaligned_start_preserves_2m_alignment() {
+    const ALIGN_2M: usize = 2 * 1024 * 1024;
+
+    let mut first = HostRegion::new(buddy_region_size(32 * PAGE_SIZE), PAGE_SIZE);
+    let mut second = irregular_region(
+        buddy_region_size(4 * ALIGN_2M),
+        PAGE_SIZE / 2,
+        PAGE_SIZE / 3,
+        ALIGN_2M,
+    );
+    let mut buddy = BuddyAllocator::<PAGE_SIZE>::new();
+    let _first_section = init_buddy(&mut buddy, &mut first, None);
+
+    let second_len = second.len();
+    let second_slice =
+        unsafe { second.subslice(PAGE_SIZE / 2, second_len - PAGE_SIZE / 2 - PAGE_SIZE / 3) };
+
+    unsafe { buddy.add_region(second_slice).unwrap() };
+
+    let addr = buddy.alloc_pages(1, ALIGN_2M).unwrap();
+    assert_eq!(addr % ALIGN_2M, 0);
+    buddy.dealloc_pages(addr, 1);
+}
+
+#[test]
 fn buddy_aligned_alloc_dealloc_uses_recorded_order() {
     let heap_size = 64 * PAGE_SIZE;
-    let mut region = HostRegion::new(buddy_region_size(heap_size), PAGE_SIZE * 16);
+    let mut region = HostRegion::new(
+        buddy_region_size(heap_size) + PAGE_SIZE * 16,
+        PAGE_SIZE * 16,
+    );
     let mut buddy = BuddyAllocator::<PAGE_SIZE>::new();
-    let _section = init_buddy(&mut buddy, &mut region, None);
+    let _section = init_buddy_with_heap_alignment(&mut buddy, &mut region, None, PAGE_SIZE * 16);
 
     let free_before = buddy.free_pages();
     let addr = buddy.alloc_pages(4, PAGE_SIZE * 16).unwrap();
@@ -170,9 +249,12 @@ fn buddy_fragmentation_blocks_high_order_then_recovers() {
 #[test]
 fn buddy_high_order_full_cycle_restores_free_pages() {
     let heap_size = 256 * PAGE_SIZE;
-    let mut region = HostRegion::new(buddy_region_size(heap_size), PAGE_SIZE * 16);
+    let mut region = HostRegion::new(
+        buddy_region_size(heap_size) + PAGE_SIZE * 16,
+        PAGE_SIZE * 16,
+    );
     let mut buddy = BuddyAllocator::<PAGE_SIZE>::new();
-    let _section = init_buddy(&mut buddy, &mut region, None);
+    let _section = init_buddy_with_heap_alignment(&mut buddy, &mut region, None, PAGE_SIZE * 16);
 
     let initial_free = buddy.free_pages();
     let requests = [
@@ -394,9 +476,9 @@ fn slab_basic() {
 
 #[test]
 fn slab_many_objects() {
-    let mut region = HostRegion::new(buddy_region_size(TEST_HEAP_SIZE), PAGE_SIZE * 4);
+    let mut region = HostRegion::new(buddy_region_size(TEST_HEAP_SIZE) + 0x10000, 0x10000);
     let mut buddy = BuddyAllocator::<PAGE_SIZE>::new();
-    let _section = init_buddy(&mut buddy, &mut region, None);
+    let _section = init_buddy_with_heap_alignment(&mut buddy, &mut region, None, 0x10000);
 
     let mut slab = SlabAllocator::<PAGE_SIZE>::new();
     let layout = Layout::from_size_align(32, 8).unwrap();
@@ -426,9 +508,9 @@ fn slab_many_objects() {
 
 #[test]
 fn slab_all_size_classes() {
-    let mut region = HostRegion::new(buddy_region_size(TEST_HEAP_SIZE), PAGE_SIZE * 4);
+    let mut region = HostRegion::new(buddy_region_size(TEST_HEAP_SIZE) + 0x10000, 0x10000);
     let mut buddy = BuddyAllocator::<PAGE_SIZE>::new();
-    let _section = init_buddy(&mut buddy, &mut region, None);
+    let _section = init_buddy_with_heap_alignment(&mut buddy, &mut region, None, 0x10000);
 
     let mut slab = SlabAllocator::<PAGE_SIZE>::new();
     let mut allocations = Vec::new();
@@ -525,6 +607,71 @@ fn slab_reuses_freed_objects_same_size_class() {
     for addr in reused_addrs {
         let ptr = unsafe { NonNull::new_unchecked(addr as *mut u8) };
         let _ = slab.dealloc(ptr, layout);
+    }
+}
+
+#[test]
+fn global_init_with_unaligned_region_preserves_large_alloc_alignment() {
+    const ALIGN_2M: usize = 2 * 1024 * 1024;
+
+    let mut region = irregular_region(12 * ALIGN_2M, 0x1234, PAGE_SIZE / 3, ALIGN_2M);
+    let allocator = GlobalAllocator::<PAGE_SIZE>::new();
+    let region_len = region.len();
+    let region_slice = unsafe { region.subslice(0x1234, region_len - 0x1234 - PAGE_SIZE / 3) };
+
+    unsafe { allocator.init(region_slice, 1, &TEST_OS).unwrap() };
+
+    let layout = Layout::from_size_align(ALIGN_2M, ALIGN_2M).unwrap();
+    let ptr = allocator.alloc(layout).unwrap();
+    assert_eq!((ptr.as_ptr() as usize) % ALIGN_2M, 0);
+    unsafe { allocator.dealloc(ptr, layout) };
+}
+
+#[test]
+fn global_add_region_with_unaligned_slice_preserves_large_alloc_alignment() {
+    const ALIGN_2M: usize = 2 * 1024 * 1024;
+
+    let allocator = GlobalAllocator::<PAGE_SIZE>::new();
+    let mut first = HostRegion::new(12 * ALIGN_2M, ALIGN_2M);
+    init_global_allocator(&allocator, &mut first, 1, &TEST_OS);
+
+    let mut second = irregular_region(12 * ALIGN_2M, 0x1234, PAGE_SIZE / 3, ALIGN_2M);
+    let second_len = second.len();
+    let second_slice = unsafe { second.subslice(0x1234, second_len - 0x1234 - PAGE_SIZE / 3) };
+    unsafe { allocator.add_region(second_slice).unwrap() };
+
+    let layout = Layout::from_size_align(ALIGN_2M, ALIGN_2M).unwrap();
+    let ptr = allocator.alloc(layout).unwrap();
+    assert_eq!((ptr.as_ptr() as usize) % ALIGN_2M, 0);
+    unsafe { allocator.dealloc(ptr, layout) };
+}
+
+#[test]
+fn global_add_region_unaligned_does_not_break_small_alloc() {
+    let allocator = GlobalAllocator::<PAGE_SIZE>::new();
+    let mut first = HostRegion::new(TEST_HEAP_SIZE, PAGE_SIZE);
+    init_global_allocator(&allocator, &mut first, 1, &TEST_OS);
+
+    let mut second = irregular_region(
+        buddy_region_size(TEST_HEAP_SIZE),
+        0x1234,
+        PAGE_SIZE / 3,
+        PAGE_SIZE,
+    );
+    let second_len = second.len();
+    let second_slice = unsafe { second.subslice(0x1234, second_len - 0x1234 - PAGE_SIZE / 3) };
+    unsafe { allocator.add_region(second_slice).unwrap() };
+
+    for layout in [
+        Layout::from_size_align(64, 8).unwrap(),
+        Layout::from_size_align(128, 16).unwrap(),
+        Layout::from_size_align(512, 64).unwrap(),
+    ] {
+        let ptr = allocator.alloc(layout).unwrap();
+        unsafe {
+            ptr.as_ptr().write_bytes(0x5a, layout.size());
+            allocator.dealloc(ptr, layout);
+        }
     }
 }
 
@@ -737,7 +884,7 @@ fn global_cross_cpu_free_multiple_rounds_same_slab() {
 
 #[test]
 fn global_small_object_churn_then_large_alloc() {
-    const REGION_SIZE: usize = 2 * 1024 * 1024;
+    const REGION_SIZE: usize = 8 * 1024 * 1024;
 
     let mut region = HostRegion::new(REGION_SIZE, PAGE_SIZE * 4);
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
@@ -809,7 +956,7 @@ fn global_cross_cpu_free_all_objects_recovers_backend_pages() {
 
 #[test]
 fn global_lowmem_fragmentation_recovery() {
-    const REGION_SIZE: usize = 512 * PAGE_SIZE;
+    const REGION_SIZE: usize = 8 * 1024 * 1024;
 
     let mut region = HostRegion::new(REGION_SIZE, PAGE_SIZE * 4);
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
@@ -879,8 +1026,8 @@ fn global_rejects_region_without_one_managed_page() {
 
 #[test]
 fn global_add_region_after_init_expands_capacity() {
-    let mut first = HostRegion::new(256 * 1024, PAGE_SIZE * 4);
-    let mut second = HostRegion::new(512 * 1024, PAGE_SIZE * 4);
+    let mut first = HostRegion::new(4 * 1024 * 1024, PAGE_SIZE * 4);
+    let mut second = HostRegion::new(8 * 1024 * 1024, PAGE_SIZE * 4);
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
     init_global(&allocator, &mut first, 1);
 
@@ -894,8 +1041,8 @@ fn global_add_region_after_init_expands_capacity() {
 
 #[test]
 fn global_add_region_supports_discontiguous_regions() {
-    let mut first = HostRegion::new(256 * 1024, PAGE_SIZE * 4);
-    let mut second = HostRegion::new(512 * 1024, PAGE_SIZE * 4);
+    let mut first = HostRegion::new(4 * 1024 * 1024, PAGE_SIZE * 4);
+    let mut second = HostRegion::new(8 * 1024 * 1024, PAGE_SIZE * 4);
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
     init_global(&allocator, &mut first, 1);
 
@@ -909,8 +1056,8 @@ fn global_add_region_supports_discontiguous_regions() {
 
 #[test]
 fn global_large_alloc_can_come_from_added_region() {
-    let mut first = HostRegion::new(256 * 1024, PAGE_SIZE * 4);
-    let mut second = HostRegion::new(1024 * 1024, PAGE_SIZE * 4);
+    let mut first = HostRegion::new(4 * 1024 * 1024, PAGE_SIZE * 4);
+    let mut second = HostRegion::new(8 * 1024 * 1024, PAGE_SIZE * 4);
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
     init_global(&allocator, &mut first, 1);
 
@@ -927,8 +1074,8 @@ fn global_large_alloc_can_come_from_added_region() {
 
 #[test]
 fn global_managed_section_queries_report_all_sections() {
-    let mut first = HostRegion::new(256 * 1024, PAGE_SIZE * 4);
-    let mut second = HostRegion::new(512 * 1024, PAGE_SIZE * 4);
+    let mut first = HostRegion::new(4 * 1024 * 1024, PAGE_SIZE * 4);
+    let mut second = HostRegion::new(8 * 1024 * 1024, PAGE_SIZE * 4);
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
     init_global(&allocator, &mut first, 1);
     unsafe { allocator.add_region(second.as_mut_slice()).unwrap() };
@@ -942,7 +1089,7 @@ fn global_managed_section_queries_report_all_sections() {
 
 #[test]
 fn global_add_region_overlap_rejected() {
-    let mut first = HostRegion::new(256 * 1024, PAGE_SIZE * 4);
+    let mut first = HostRegion::new(4 * 1024 * 1024, PAGE_SIZE * 4);
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
     init_global(&allocator, &mut first, 1);
 
@@ -953,8 +1100,8 @@ fn global_add_region_overlap_rejected() {
 
 #[test]
 fn global_managed_bytes_matches_all_sections() {
-    let mut first = HostRegion::new(256 * 1024, PAGE_SIZE * 4);
-    let mut second = HostRegion::new(512 * 1024, PAGE_SIZE * 4);
+    let mut first = HostRegion::new(4 * 1024 * 1024, PAGE_SIZE * 4);
+    let mut second = HostRegion::new(8 * 1024 * 1024, PAGE_SIZE * 4);
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
     init_global(&allocator, &mut first, 1);
     unsafe { allocator.add_region(second.as_mut_slice()).unwrap() };
