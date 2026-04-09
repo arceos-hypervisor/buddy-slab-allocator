@@ -7,12 +7,12 @@
 
 pub mod page_meta;
 
-pub use page_meta::{PageFlags, PageMeta, PFN_NONE};
+pub use page_meta::{PFN_NONE, PageFlags, PageMeta};
 
 use core::ptr;
 
 use crate::error::{AllocError, AllocResult};
-use crate::{align_up, is_aligned, OsImpl};
+use crate::{OsImpl, align_up, is_aligned};
 use page_meta::{free_list_pop, free_list_push, free_list_remove};
 
 /// Maximum buddy order. With 4 KiB pages this gives 2^20 × 4 KiB = 4 GiB blocks.

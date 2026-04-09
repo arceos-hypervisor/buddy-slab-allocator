@@ -4,7 +4,7 @@ use buddy_slab_allocator::{
     BuddyAllocator, GlobalAllocator, OsImpl, SlabAllocResult, SlabAllocator, SlabDeallocResult,
 };
 use core::alloc::Layout;
-use rand::{rngs::StdRng, SeedableRng};
+use rand::{SeedableRng, rngs::StdRng};
 use std::alloc::{alloc, dealloc};
 use std::sync::atomic::{AtomicUsize, Ordering};
 

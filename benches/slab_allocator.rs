@@ -2,9 +2,9 @@
 
 mod common;
 
-use common::{SlabHarness, HEAP_SIZE, OPERATIONS_PER_BATCH};
+use common::{HEAP_SIZE, OPERATIONS_PER_BATCH, SlabHarness};
 use core::alloc::Layout;
-use divan::{black_box, Bencher};
+use divan::{Bencher, black_box};
 
 fn main() {
     divan::main();

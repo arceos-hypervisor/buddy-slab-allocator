@@ -4,7 +4,7 @@ mod common;
 
 use common::{GlobalHarness, HEAP_SIZE, MOCK_OS, OPERATIONS_PER_BATCH, PAGE_SIZE};
 use core::alloc::Layout;
-use divan::{black_box, Bencher};
+use divan::{Bencher, black_box};
 
 fn main() {
     divan::main();

@@ -5,7 +5,7 @@ extern crate buddy_slab_allocator;
 mod common;
 
 use buddy_slab_allocator::GlobalAllocator;
-use common::{init_global, HostRegion, LOWMEM_OS};
+use common::{HostRegion, LOWMEM_OS, init_global};
 
 const PAGE_SIZE: usize = 0x1000;
 const TEST_HEAP_SIZE: usize = 16 * 1024 * 1024;

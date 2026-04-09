@@ -4,16 +4,16 @@ extern crate buddy_slab_allocator;
 mod common;
 
 use buddy_slab_allocator::{
-    slab::SlabPageHeader, AllocError, BuddyAllocator, GlobalAllocator, ManagedSection, SizeClass,
-    SlabAllocResult, SlabAllocator, SlabDeallocResult,
+    AllocError, BuddyAllocator, GlobalAllocator, ManagedSection, SizeClass, SlabAllocResult,
+    SlabAllocator, SlabDeallocResult, slab::SlabPageHeader,
 };
 use core::alloc::Layout;
 use core::ptr::NonNull;
 use std::collections::BTreeSet;
 
 use common::{
-    count_free_pages, init_global as init_global_allocator, set_current_cpu, HostRegion, LOWMEM_OS,
-    TEST_OS,
+    HostRegion, LOWMEM_OS, TEST_OS, count_free_pages, init_global as init_global_allocator,
+    set_current_cpu,
 };
 
 const PAGE_SIZE: usize = 0x1000;

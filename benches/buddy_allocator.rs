@@ -3,9 +3,9 @@
 mod common;
 
 use common::{
-    seeded_rng, BuddyHarness, FRAGMENTATION_PAGES, HEAP_SIZE, OPERATIONS_PER_BATCH, PAGE_SIZE,
+    BuddyHarness, FRAGMENTATION_PAGES, HEAP_SIZE, OPERATIONS_PER_BATCH, PAGE_SIZE, seeded_rng,
 };
-use divan::{black_box, Bencher};
+use divan::{Bencher, black_box};
 use rand::RngExt;
 
 fn main() {

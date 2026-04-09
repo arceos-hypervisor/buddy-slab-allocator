@@ -85,11 +85,7 @@ impl SizeClass {
             // 2048-byte objects: 4 pages → header + room for objects
             let v = 16 * page_size / (obj_size * 8);
             let v = if v < 4 { v } else { 4 };
-            if v < 1 {
-                1
-            } else {
-                v
-            }
+            if v < 1 { 1 } else { v }
         }
     }
 }

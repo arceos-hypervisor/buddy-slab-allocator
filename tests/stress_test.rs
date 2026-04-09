@@ -4,8 +4,8 @@ mod common;
 
 use buddy_slab_allocator::{GlobalAllocator, SizeClass};
 use common::{
-    count_free_pages, init_global, nonnull_from_addr, seeded_rng, set_current_cpu, HostRegion,
-    TEST_OS,
+    HostRegion, TEST_OS, count_free_pages, init_global, nonnull_from_addr, seeded_rng,
+    set_current_cpu,
 };
 use rand::RngExt;
 use std::alloc::Layout;

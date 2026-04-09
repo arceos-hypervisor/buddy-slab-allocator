@@ -2,8 +2,8 @@
 
 use buddy_slab_allocator::{GlobalAllocator, OsImpl};
 use core::ptr::NonNull;
-use rand::{rngs::StdRng, SeedableRng};
-use std::alloc::{alloc, dealloc, Layout};
+use rand::{SeedableRng, rngs::StdRng};
+use std::alloc::{Layout, alloc, dealloc};
 use std::cell::Cell;
 
 thread_local! {

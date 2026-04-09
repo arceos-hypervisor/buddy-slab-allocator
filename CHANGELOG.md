@@ -82,6 +82,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Comprehensive edge case coverage
 
 ## [Unreleased]: https://github.com/arceos-hypervisor/buddy-slab-allocator/compare/v0.2.0...HEAD
+
+## [0.2.1](https://github.com/arceos-hypervisor/buddy-slab-allocator/compare/v0.2.0...v0.2.1) - 2026-04-09
+
+### Added
+
+- enhance slab allocation by reclaiming full slabs with remote frees and add integration tests for cross-CPU deallocation
+- implement Default trait for BuddyAllocator, GlobalAllocator, and SlabAllocator
+- remove alloc_pages_at method from buddy allocator and related components; simplify allocation logic
+- refactor allocator interfaces and remove deprecated dependencies; update documentation and examples
+- enhance logging support by integrating log crate and updating documentation
+
+### Other
+
+- format code for better readability in common.rs
+- streamline region initialization by introducing SectionInitSpec for better clarity and maintainability
+- Refactor GlobalAllocator to support multiple managed sections
+- Refactor stress tests for allocator stability
+- update allocator initialization to use a mutable slice instead of separate start and size parameters
+- Refactor slab allocator benchmarks and improve global allocator initialization
+- Refactor integration and stress tests for buddy-slab-allocator
+- Refactor integration and stress tests for allocator
+- Refactor benchmarks and remove stability tests
+- update workflows and dependencies; migrate to actions/checkout@v6 and rand v0.10
 ## [0.2.0]: https://github.com/arceos-hypervisor/buddy-slab-allocator/compare/v0.1.1...v0.2.0
 ## [0.1.1]: https://github.com/arceos-hypervisor/buddy-slab-allocator/compare/v0.1.0...v0.1.1
 ## [0.1.0]: https://github.com/arceos-hypervisor/buddy-slab-allocator/releases/tag/v0.1.0

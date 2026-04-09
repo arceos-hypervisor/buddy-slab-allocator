@@ -10,10 +10,10 @@ use spin::Mutex as SpinMutex;
 
 use crate::buddy::{BuddyAllocator, BuddySection, ManagedSection, PageFlags, SectionInitSpec};
 use crate::error::{AllocError, AllocResult};
-use crate::slab::page::{SlabPageHeader, SLAB_MAGIC};
-use crate::slab::size_class::{SizeClass, SLAB_MAX_SIZE};
+use crate::slab::page::{SLAB_MAGIC, SlabPageHeader};
+use crate::slab::size_class::{SLAB_MAX_SIZE, SizeClass};
 use crate::slab::{SlabAllocResult, SlabAllocator, SlabDeallocResult};
-use crate::{align_up, OsImpl};
+use crate::{OsImpl, align_up};
 
 struct InitialRegionLayout {
     section_start: usize,
@@ -46,11 +46,7 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
         let a2 = core::mem::align_of::<crate::buddy::PageMeta>();
         let a3 = core::mem::align_of::<SpinMutex<SlabAllocator<PAGE_SIZE>>>();
         let m = if a1 > a2 { a1 } else { a2 };
-        if m > a3 {
-            m
-        } else {
-            a3
-        }
+        if m > a3 { m } else { a3 }
     }
 
     fn metadata_layout_for_pages(pages: usize, cpu_count: usize) -> Option<(usize, usize, usize)> {
