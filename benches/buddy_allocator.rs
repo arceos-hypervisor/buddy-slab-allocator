@@ -1,288 +1,105 @@
-//! Benchmarks for BuddyPageAllocator - page-level memory allocation
-//!
-//! This benchmark suite tests the performance and stability of the Buddy allocator
-//! which handles page-level allocations with automatic merging.
+//! Benchmarks for the buddy page allocator.
 
-use buddy_slab_allocator::{
-    BaseAllocator, BuddyPageAllocator, CompositePageAllocator, PageAllocator,
+mod common;
+
+use common::{
+    BuddyHarness, FRAGMENTATION_PAGES, HEAP_SIZE, OPERATIONS_PER_BATCH, PAGE_SIZE, seeded_rng,
 };
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use rand::{Rng, SeedableRng};
-use std::alloc::Layout;
-use std::alloc::{alloc, dealloc};
+use divan::{Bencher, black_box};
+use rand::RngExt;
 
-const PAGE_SIZE: usize = 0x1000;
-const HEAP_SIZE: usize = 64 * 1024 * 1024; // 64MB
-
-/// Allocate a test heap from the system allocator
-fn alloc_test_heap(size: usize) -> (*mut u8, Layout) {
-    let layout = Layout::from_size_align(size, PAGE_SIZE).unwrap();
-    let ptr = unsafe { alloc(layout) };
-    assert!(!ptr.is_null(), "Failed to allocate test heap");
-    (ptr, layout)
+fn main() {
+    divan::main();
 }
 
-/// Deallocate the test heap
-fn dealloc_test_heap(ptr: *mut u8, layout: Layout) {
-    unsafe { dealloc(ptr, layout) };
-}
+#[divan::bench_group]
+mod buddy {
+    use super::*;
 
-/// Benchmark single page allocation
-fn bench_single_page_alloc(c: &mut Criterion) {
-    let (heap_ptr, heap_layout) = alloc_test_heap(HEAP_SIZE);
+    #[divan::bench(args = [1usize, 2, 4, 16, 64])]
+    fn page_alloc_free(bencher: Bencher, pages: usize) {
+        let mut harness = BuddyHarness::new(HEAP_SIZE);
 
-    c.bench_function("buddy_single_page_alloc", |b| {
-        let mut allocator = BuddyPageAllocator::<PAGE_SIZE>::new();
-        allocator.init(heap_ptr as usize, HEAP_SIZE);
-
-        b.iter(|| {
-            let addr = allocator.alloc_pages(black_box(1), PAGE_SIZE);
+        bencher.bench_local(|| {
+            let addr = harness
+                .allocator
+                .alloc_pages(black_box(pages), PAGE_SIZE)
+                .unwrap();
+            harness.allocator.dealloc_pages(addr, pages);
             black_box(addr)
         });
-    });
-
-    dealloc_test_heap(heap_ptr, heap_layout);
-}
-
-/// Benchmark multiple page allocations
-fn bench_multi_page_alloc(c: &mut Criterion) {
-    let page_counts = [1, 2, 4, 8, 16, 32, 64];
-
-    let mut group = c.benchmark_group("buddy_multi_page_alloc");
-
-    for num_pages in page_counts.iter() {
-        let (heap_ptr, heap_layout) = alloc_test_heap(HEAP_SIZE);
-
-        group.bench_with_input(BenchmarkId::from_parameter(num_pages), num_pages, |b, _| {
-            let mut allocator = BuddyPageAllocator::<PAGE_SIZE>::new();
-            allocator.init(heap_ptr as usize, HEAP_SIZE);
-
-            b.iter(|| {
-                let addr = allocator.alloc_pages(black_box(*num_pages), PAGE_SIZE);
-                black_box(addr)
-            });
-        });
-
-        dealloc_test_heap(heap_ptr, heap_layout);
     }
 
-    group.finish();
-}
+    #[divan::bench(args = [PAGE_SIZE, PAGE_SIZE * 2, PAGE_SIZE * 4, PAGE_SIZE * 16])]
+    fn aligned_page_alloc_free(bencher: Bencher, align: usize) {
+        let mut harness = BuddyHarness::new(HEAP_SIZE);
 
-/// Benchmark deallocation with automatic merging
-fn bench_dealloc_with_merge(c: &mut Criterion) {
-    let (heap_ptr, heap_layout) = alloc_test_heap(HEAP_SIZE);
-
-    c.bench_function("buddy_dealloc_with_merge", |b| {
-        let mut allocator = BuddyPageAllocator::<PAGE_SIZE>::new();
-        allocator.init(heap_ptr as usize, HEAP_SIZE);
-
-        // Pre-allocate multiple buddy blocks that will merge
-        let mut addrs = Vec::new();
-        for _ in 0..64 {
-            let addr = allocator.alloc_pages(1, PAGE_SIZE).unwrap();
-            addrs.push(addr);
-        }
-
-        b.iter(|| {
-            // Deallocate and allocate to test merging efficiency
-            let addr = addrs.pop().unwrap();
-            allocator.dealloc_pages(black_box(addr), 1);
-            // Allocate again to reuse merged blocks
-            let new_addr = allocator.alloc_pages(1, PAGE_SIZE);
-            addrs.push(new_addr.unwrap());
+        bencher.bench_local(|| {
+            let addr = harness
+                .allocator
+                .alloc_pages(black_box(4), black_box(align))
+                .unwrap();
+            harness.allocator.dealloc_pages(addr, 4);
+            black_box(addr)
         });
-
-        // Cleanup remaining allocations
-        for addr in addrs {
-            allocator.dealloc_pages(addr, 1);
-        }
-    });
-
-    dealloc_test_heap(heap_ptr, heap_layout);
-}
-
-/// Benchmark allocation with different alignments
-fn bench_alloc_with_alignment(c: &mut Criterion) {
-    let alignments = [PAGE_SIZE, PAGE_SIZE * 2, PAGE_SIZE * 4, PAGE_SIZE * 8];
-
-    let mut group = c.benchmark_group("buddy_alloc_with_alignment");
-
-    for alignment in alignments.iter() {
-        let (heap_ptr, heap_layout) = alloc_test_heap(HEAP_SIZE);
-
-        group.bench_with_input(BenchmarkId::from_parameter(alignment), alignment, |b, _| {
-            let mut allocator = BuddyPageAllocator::<PAGE_SIZE>::new();
-            allocator.init(heap_ptr as usize, HEAP_SIZE);
-
-            b.iter(|| {
-                let addr = allocator.alloc_pages(black_box(4), black_box(*alignment));
-                black_box(addr)
-            });
-        });
-
-        dealloc_test_heap(heap_ptr, heap_layout);
     }
 
-    group.finish();
-}
+    #[divan::bench]
+    fn fragmentation_recovery_cycle(bencher: Bencher) {
+        let mut harness = BuddyHarness::new(HEAP_SIZE);
 
-/// Benchmark fragmentation resistance
-fn bench_fragmentation(c: &mut Criterion) {
-    let (heap_ptr, heap_layout) = alloc_test_heap(HEAP_SIZE);
-
-    c.bench_function("buddy_fragmentation", |b| {
-        let mut allocator = BuddyPageAllocator::<PAGE_SIZE>::new();
-        allocator.init(heap_ptr as usize, HEAP_SIZE);
-
-        b.iter(|| {
-            // Allocate many small blocks, then free half
-            let mut addrs = Vec::new();
-            for _ in 0..512 {
-                let addr = allocator.alloc_pages(1, PAGE_SIZE).unwrap();
-                addrs.push(addr);
+        bencher.bench_local(|| {
+            let mut addrs = Vec::with_capacity(FRAGMENTATION_PAGES);
+            for _ in 0..FRAGMENTATION_PAGES {
+                addrs.push(harness.allocator.alloc_pages(1, PAGE_SIZE).unwrap());
             }
 
-            // Free every other allocation
-            for i in (0..512).step_by(2) {
-                allocator.dealloc_pages(addrs[i], 1);
+            for idx in (0..addrs.len()).step_by(2) {
+                harness.allocator.dealloc_pages(addrs[idx], 1);
             }
 
-            // Try to allocate a large block - should succeed if fragmentation is low
-            let large_layout = Layout::from_size_align(PAGE_SIZE * 64, PAGE_SIZE).unwrap();
-            let large_addr = allocator.alloc_pages(64, PAGE_SIZE);
+            let large = harness.allocator.alloc_pages(64, PAGE_SIZE).unwrap();
+            harness.allocator.dealloc_pages(large, 64);
 
-            // Cleanup
-            if let Ok(addr) = large_addr {
-                allocator.dealloc_pages(addr, 64);
+            for idx in (1..addrs.len()).step_by(2) {
+                harness.allocator.dealloc_pages(addrs[idx], 1);
             }
-            for i in (1..512).step_by(2) {
-                allocator.dealloc_pages(addrs[i], 1);
-            }
+
+            black_box(large)
         });
-    });
+    }
 
-    dealloc_test_heap(heap_ptr, heap_layout);
-}
+    #[divan::bench]
+    fn random_page_workload(bencher: Bencher) {
+        let mut harness = BuddyHarness::new(HEAP_SIZE);
+        let mut rng = seeded_rng();
+        let plan: Vec<(bool, usize, usize)> = (0..OPERATIONS_PER_BATCH)
+            .map(|_| {
+                let allocate = rng.random_bool(0.65);
+                let pages = 1usize << rng.random_range(0..=4);
+                let free_hint = rng.random_range(0..OPERATIONS_PER_BATCH.max(1));
+                (allocate, pages, free_hint)
+            })
+            .collect();
 
-/// Benchmark random allocation pattern
-fn bench_random_pattern(c: &mut Criterion) {
-    let (heap_ptr, heap_layout) = alloc_test_heap(HEAP_SIZE);
+        bencher.bench_local(|| {
+            let mut active = Vec::new();
 
-    c.bench_function("buddy_random_pattern", |b| {
-        let mut allocator = BuddyPageAllocator::<PAGE_SIZE>::new();
-        allocator.init(heap_ptr as usize, HEAP_SIZE);
-        let mut rng = rand::rngs::SmallRng::from_seed([0; 32]);
-
-        b.iter(|| {
-            let mut allocated = Vec::new();
-
-            // Random alloc/dealloc pattern
-            for _ in 0..1000 {
-                if allocated.is_empty() || rng.gen_bool(0.7) {
-                    // Allocate
-                    let pages = 1 << rng.gen_range(0..5); // 1, 2, 4, 8, 16 pages
-                    match allocator.alloc_pages(pages, PAGE_SIZE) {
-                        Ok(addr) => allocated.push((addr, pages)),
-                        Err(_) => break, // Out of memory
+            for &(allocate, pages, free_hint) in &plan {
+                if allocate || active.is_empty() {
+                    if let Ok(addr) = harness.allocator.alloc_pages(pages, PAGE_SIZE) {
+                        active.push((addr, pages));
                     }
                 } else {
-                    // Deallocate random item
-                    let idx = rng.gen_range(0..allocated.len());
-                    let (addr, pages) = allocated.swap_remove(idx);
-                    allocator.dealloc_pages(addr, pages);
+                    let idx = free_hint % active.len();
+                    let (addr, count) = active.swap_remove(idx);
+                    harness.allocator.dealloc_pages(addr, count);
                 }
             }
 
-            // Cleanup
-            for (addr, pages) in allocated {
-                allocator.dealloc_pages(addr, pages);
+            for (addr, count) in active {
+                harness.allocator.dealloc_pages(addr, count);
             }
         });
-    });
-
-    dealloc_test_heap(heap_ptr, heap_layout);
+    }
 }
-
-/// Benchmark CompositePageAllocator with contiguous block combination
-fn bench_composite_allocator(c: &mut Criterion) {
-    let (heap_ptr, heap_layout) = alloc_test_heap(HEAP_SIZE);
-
-    c.bench_function("composite_allocator", |b| {
-        let mut allocator = CompositePageAllocator::<PAGE_SIZE>::new();
-        allocator.init(heap_ptr as usize, HEAP_SIZE);
-
-        b.iter(|| {
-            // Allocate and deallocate pages
-            for _ in 0..100 {
-                let addr = allocator.alloc_pages(1, PAGE_SIZE);
-                if let Ok(a) = addr {
-                    allocator.dealloc_pages(a, 1);
-                }
-            }
-        });
-    });
-
-    dealloc_test_heap(heap_ptr, heap_layout);
-}
-
-/// Benchmark allocate at specific address
-fn bench_alloc_at(c: &mut Criterion) {
-    let (heap_ptr, heap_layout) = alloc_test_heap(HEAP_SIZE);
-
-    c.bench_function("buddy_alloc_at", |b| {
-        let mut allocator = BuddyPageAllocator::<PAGE_SIZE>::new();
-        allocator.init(heap_ptr as usize, HEAP_SIZE);
-
-        // Pre-allocate to create space for specific allocation
-        let addr1 = allocator.alloc_pages(1, PAGE_SIZE).unwrap();
-        allocator.dealloc_pages(addr1, 1);
-
-        b.iter(|| {
-            // Try to allocate at a specific address
-            let target = addr1;
-            let addr = allocator.alloc_pages_at(black_box(target), 1, PAGE_SIZE);
-            black_box(addr)
-        });
-    });
-
-    dealloc_test_heap(heap_ptr, heap_layout);
-}
-
-/// Benchmark statistics retrieval
-fn bench_statistics(c: &mut Criterion) {
-    let (heap_ptr, heap_layout) = alloc_test_heap(HEAP_SIZE);
-
-    c.bench_function("buddy_statistics", |b| {
-        let mut allocator = BuddyPageAllocator::<PAGE_SIZE>::new();
-        allocator.init(heap_ptr as usize, HEAP_SIZE);
-
-        // Make some allocations
-        for _ in 0..10 {
-            let _ = allocator.alloc_pages(1, PAGE_SIZE);
-        }
-
-        b.iter(|| {
-            let total = allocator.total_pages();
-            let used = allocator.used_pages();
-            let available = allocator.available_pages();
-            black_box((total, used, available))
-        });
-    });
-
-    dealloc_test_heap(heap_ptr, heap_layout);
-}
-
-criterion_group!(
-    benches,
-    bench_single_page_alloc,
-    bench_multi_page_alloc,
-    bench_dealloc_with_merge,
-    bench_alloc_with_alignment,
-    bench_fragmentation,
-    bench_random_pattern,
-    bench_composite_allocator,
-    bench_alloc_at,
-    bench_statistics
-);
-criterion_main!(benches);

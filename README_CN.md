@@ -1,191 +1,230 @@
 # buddy-slab-allocator 内存分配器
 
-一个高效的页级和字节级内存分配器，为嵌入式/内核环境设计。
+这是一个面向内核和嵌入式环境的 `no_std` 两级内存分配器，结合了 buddy 页分配器与 per-CPU slab 小对象分配器。
+
+## 总览
+
+当前实现由三层组成：
+
+1. `BuddyAllocator`
+   管理一个或多个虚拟内存 section，支持按 2 的幂分裂与合并。
+2. `SlabAllocator`
+   管理 `<= 2048` 字节的小对象，采用固定 size class。
+3. `GlobalAllocator`
+   将两者组合起来，对小对象走 per-CPU slab，对大对象走 buddy 页分配。
+
+更完整的设计细节见 [docs/design.md](docs/design.md)。
+
+## 架构图
+
+```mermaid
+flowchart TD
+    GA[GlobalAllocator] --> B[SpinMutex<BuddyAllocator>]
+    GA --> OS[OsImpl]
+    GA --> PCS[per_cpu_slabs: *mut SpinMutex<SlabAllocator>[]]
+
+    B --> PM[PageMeta[]]
+    B --> FL[按 order 的 free_lists]
+
+    PCS --> SA[SlabAllocator]
+    SA --> SC[9 个 SlabCache]
+    SC --> P[partial]
+    SC --> F[full]
+    SC --> E[empty]
+    SC --> H[SlabPageHeader]
+```
+
+### 分配路由
+
+```mermaid
+flowchart TD
+    A[GlobalAllocator::alloc(layout)] --> B{size <= 2048 且 align <= 2048?}
+    B -- 是 --> C[走当前 CPU 的 slab allocator]
+    C --> D{slab 直接命中?}
+    D -- 是 --> E[返回对象指针]
+    D -- 否 --> F[从 buddy 申请新 slab 页]
+    F --> G[add_slab 后重试]
+    G --> E
+    B -- 否 --> H[直接走 buddy 页分配]
+    H --> I[返回页级指针]
+```
+
+### 跨 CPU 释放
+
+```mermaid
+sequenceDiagram
+    participant CPU1 as 当前 CPU
+    participant H as SlabPageHeader
+    participant CPU0 as owner CPU
+    participant S as owner SlabAllocator
+
+    CPU1->>H: remote_free(obj_addr)
+    Note right of H: 无锁 CAS 推入 remote_free_head
+    CPU1-->>CPU1: 立即返回
+
+    CPU0->>S: 后续本地 alloc/dealloc
+    S->>H: drain_remote_frees()
+    H-->>S: 远程释放对象回收到本地 bitmap
+```
 
 ## 特性
 
-- **Buddy 页分配器**：页级内存分配
-- **Slab 字节分配器**：小对象分配
-- **复合页分配器**：统一的多区域页分配接口
-- **全局分配器**：协调页分配器和字节分配器，提供统一的分配接口
-- **零 `std` 依赖**：完全 `#![no_std]`，适合嵌入式和内核环境
-- **条件日志**：支持 `log` feature 启用日志，默认无依赖
-- **内存追踪**：支持 `tracking` feature 收集详细统计信息
+- Buddy 页分配，支持拆分与合并
+- 支持通过 `add_region` 动态追加可管理 region
+- Slab 小对象分配，固定 9 个 size class：`8..=2048`
+- per-CPU slab cache
+- 跨 CPU 释放走 lock-free remote free
+- 支持 `alloc_pages_lowmem` 低地址页分配
+- 适合 `no_std`
+- 内置 `log` 日志支持
+- 可分别独立使用 `BuddyAllocator` 与 `SlabAllocator`
 
-## 快速开始
-
-### 添加依赖
-
-在 `Cargo.toml` 中添加：
+## 添加依赖
 
 ```toml
 [dependencies]
-buddy-slab-allocator = "0.1.0"
-
-# 可选功能
-buddy-slab-allocator = { version = "0.1.0", features = ["log"] }      # 启用日志
-buddy-slab-allocator = { version = "0.1.0", features = ["tracking"] }  # 启用追踪
+buddy-slab-allocator = "0.2.0"
 ```
 
-### 基本使用
-
-#### 使用全局分配器
+## 使用 `GlobalAllocator`
 
 ```rust
-use buddy_slab_allocator::GlobalAllocator;
-use core::alloc::Layout;
-
-// 创建全局分配器
-let mut global = GlobalAllocator::new();
-
-// 使用内存区域初始化全局分配器
-let heap_start = 0x8000_0000;
-let heap_size = 16 * 1024 * 1024; // 16MB
-global.init(heap_start, heap_size).unwrap();
-
-// 或添加多个内存池
-global.add_memory(0x80000000, 0x1000000).unwrap();
-global.add_memory(0x81000000, 0x1000000).unwrap();
-
-// 小于 2048 byte 的小对象分配（自动使用 Slab）
-let small_layout = Layout::from_size_align(64, 8).unwrap();
-let small_ptr = global.alloc(small_layout).unwrap();
-
-// 大对象分配（自动使用页分配器）
-let large_layout = Layout::from_size_align(0x1000, 0x1000).unwrap();
-let large_ptr = global.alloc(large_layout).unwrap();
-
-// 释放内存
-global.dealloc(small_ptr, small_layout);
-global.dealloc(large_ptr, large_layout);
-```
-
-#### 直接使用页分配器
-
-```rust
-use buddy_slab_allocator::CompositePageAllocator;
-
-const PAGE_SIZE: usize = 0x1000;
-let mut page_alloc = CompositePageAllocator::<PAGE_SIZE>::new();
-
-// 使用内存区域初始化
-page_alloc.init(0x8000_0000, 16 * 1024 * 1024).unwrap();
-
-// 分配页
-let addr = page_alloc.alloc_pages(4, PAGE_SIZE).unwrap();
-// 使用分配的内存...
-page_alloc.dealloc_pages(addr, 4);
-```
-
-#### 直接使用 Slab 分配器
-
-```rust
-use buddy_slab_allocator::SlabByteAllocator;
-use buddy_slab_allocator::page_allocator::PageAllocatorForSlab;
-use buddy_slab_allocator::CompositePageAllocator;
+use buddy_slab_allocator::{GlobalAllocator, OsImpl};
 use core::alloc::Layout;
 
 const PAGE_SIZE: usize = 0x1000;
-let mut page_alloc = CompositePageAllocator::<PAGE_SIZE>::new();
-page_alloc.init(0x8000_0000, 16 * 1024 * 1024).unwrap();
 
-let mut slab_alloc = SlabByteAllocator::<PAGE_SIZE>::new();
+struct DemoOs;
 
-// 小对象分配快速
+impl OsImpl for DemoOs {
+    fn current_cpu_idx(&self) -> usize { 0 }
+    fn virt_to_phys(&self, vaddr: usize) -> usize { vaddr }
+}
+
+static OS: DemoOs = DemoOs;
+
+let allocator = GlobalAllocator::<PAGE_SIZE>::new();
+let region_start = 0x8000_0000 as *mut u8;
+let region_size = 16 * 1024 * 1024;
+let region = unsafe { core::slice::from_raw_parts_mut(region_start, region_size) };
+
+unsafe {
+    allocator.init(region, 1, &OS).unwrap();
+}
+
 let layout = Layout::from_size_align(64, 8).unwrap();
-let ptr = slab_alloc.alloc(&mut page_alloc, layout).unwrap();
+let ptr = allocator.alloc(layout).unwrap();
 
-// 释放内存
-slab_alloc.dealloc(&mut page_alloc, ptr, layout);
+unsafe {
+    allocator.dealloc(ptr, layout);
+}
+
+let extra_region_start = 0x9000_0000 as *mut u8;
+let extra_region_size = 8 * 1024 * 1024;
+let extra_region = unsafe {
+    core::slice::from_raw_parts_mut(extra_region_start, extra_region_size)
+};
+
+unsafe {
+    allocator.add_region(extra_region).unwrap();
+}
 ```
 
-## 特性详解
+## 分别使用 Buddy 与 Slab
 
-### 条件日志
-
-通过 `log` feature 启用日志功能：
-
-```toml
-buddy-slab-allocator = { version = "0.1.0", features = ["log"] }
-```
-
-启用后可使用标准 `log` crate 的宏记录分配事件：
+如果需要更底层的控制，也可以分别使用这两个组件。
 
 ```rust
-log::info!("分配内存于 {:x}", addr);
+use buddy_slab_allocator::{
+    BuddyAllocator, SlabAllocResult, SlabAllocator, SlabDeallocResult,
+};
+use core::alloc::Layout;
+
+const PAGE_SIZE: usize = 0x1000;
+let region_start = 0x8000_0000 as *mut u8;
+let region_size = 16 * 1024 * 1024;
+let region = unsafe { core::slice::from_raw_parts_mut(region_start, region_size) };
+
+let mut buddy = BuddyAllocator::<PAGE_SIZE>::new();
+unsafe {
+    buddy.init(region, None).unwrap();
+}
+
+let mut slab = SlabAllocator::<PAGE_SIZE>::new();
+let layout = Layout::from_size_align(64, 8).unwrap();
+
+let ptr = loop {
+    match slab.alloc(layout).unwrap() {
+        SlabAllocResult::Allocated(ptr) => break ptr,
+        SlabAllocResult::NeedsSlab { size_class, pages } => {
+            let slab_bytes = pages * PAGE_SIZE;
+            let addr = buddy.alloc_pages(pages, slab_bytes).unwrap();
+            slab.add_slab(size_class, addr, slab_bytes, 0);
+        }
+    }
+};
+
+match slab.dealloc(ptr, layout) {
+    SlabDeallocResult::Done => {}
+    SlabDeallocResult::FreeSlab { base, pages } => {
+        buddy.dealloc_pages(base, pages);
+    }
+}
+
+let extra_region_start = 0x9000_0000 as *mut u8;
+let extra_region_size = 8 * 1024 * 1024;
+let extra_region = unsafe {
+    core::slice::from_raw_parts_mut(extra_region_start, extra_region_size)
+};
+
+unsafe {
+    buddy.add_region(extra_region).unwrap();
+}
 ```
 
-未启用时，日志调用会被编译为空操作，零运行时开销。
+## 公开 API 摘要
 
-### 内存追踪
+- `GlobalAllocator<PAGE_SIZE>`
+  高层门面，也可以作为 `GlobalAlloc` 使用，并支持 `add_region`、`managed_section_count`、`managed_section`、`managed_bytes` 与 `allocated_bytes`。
+- `BuddyAllocator<PAGE_SIZE>`
+  独立多 section 页分配器，支持 `init`、`add_region`、section 查询、`managed_bytes` 与 `allocated_bytes`。
+- `ManagedSection`
+  单个 managed section 的只读摘要。
+- `SlabAllocator<PAGE_SIZE>`
+  独立 slab 分配器。
+- `SizeClass`
+  slab 使用的固定对象尺寸类。
+- `SlabAllocResult`
+  `Allocated(ptr)` 或 `NeedsSlab { size_class, pages }`。
+- `SlabDeallocResult`
+  `Done` 或 `FreeSlab { base, pages }`。
+- `OsImpl`
+  提供 `current_cpu_idx()` 和 `virt_to_phys()`，用于 per-CPU 路由与 lowmem 选择。
 
-通过 `tracking` feature 启用详细的内存使用追踪：
-
-```toml
-buddy-slab-allocator = { version = "0.1.0", features = ["tracking"] }
-```
-
-启用后可以：
-- 收集每种内存用途的字节数统计
-- 记录每次分配的回溯信息
-- 跟踪分配代际变化
-
-## 性能特性
-
-- **快速分配**：小对象分配 O(1) 时间复杂度
-- **内存效率**：Buddy 算法有效减少外部碎片
-- **自动合并**：释放的页面自动合并，减少碎片
+`managed_bytes` 只统计可分配 heap，不包含 region 前缀 metadata。
+`allocated_bytes` 表示后端页占用，不是用户请求的 `layout.size()` 精确求和。
 
 ## 测试
 
-运行测试套件：
-
 ```bash
-# 运行所有测试
-cargo test --package buddy-slab-allocator
+# 常规测试
+cargo test
 
-# 启用日志运行测试
-cargo test --package buddy-slab-allocator --features log
+# 串行执行，便于排查问题
+cargo test -- --test-threads=1
 
-# 启用追踪运行测试
-cargo test --package buddy-slab-allocator --features tracking
-```
+# 运行忽略的压力测试
+cargo test --test stress_test -- --ignored --nocapture
 
-## 性能测试
+# 检查 benchmark 是否可编译
+cargo check --benches
 
-此项目包含全面的性能测试，用于在各种条件下评估分配器的性能和稳定性。详细的中文说明请查看 `benches/README_CN.md`。
-
-```bash
-# 运行所有 benchmark
+# 运行 benchmark
 cargo bench
 ```
 
-详细使用方法请参考 `benches/README_CN.md`。
-
-## 文档
-
-API 文档可在 [docs.rs](https://docs.rs/buddy-slab-allocator) 上查看。
-
-在本地构建和查看文档：
-
-```bash
-cargo doc --no-deps --open
-```
+更多测试说明见 [tests/README.md](tests/README.md)。
 
 ## 许可证
 
-本项目采用以下许可证：
-
-- **GPL-3.0-or-later** 或
-- **Apache-2.0** 或
-- **MIT**
-
-你可以选择其中任何一种许可证使用。
-
-## 贡献
-
-欢迎贡献！请随时提交 Pull Request。
-
-## 仓库
-
-[https://github.com/arceos-hypervisor/buddy-slab-allocator](https://github.com/arceos-hypervisor/buddy-slab-allocator)
+采用 [Apache-2.0](LICENSE) 许可证。
