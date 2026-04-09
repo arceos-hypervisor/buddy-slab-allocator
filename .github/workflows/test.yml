@@ -20,4 +20,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run all tests
-        run: cargo test --features tracking
+        run: cargo test
+
+      - name: Run tests serially
+        run: cargo test -- --test-threads=1
+
+      - name: Run ignored stress tests
+        run: cargo test --test stress_test -- --ignored --nocapture

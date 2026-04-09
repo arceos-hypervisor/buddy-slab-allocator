@@ -1,27 +1,91 @@
 # buddy-slab-allocator 内存分配器
 
-一个面向内核和嵌入式环境的 `no_std` Buddy + Slab 分配器。
+这是一个面向内核和嵌入式环境的 `no_std` 两级内存分配器，结合了 buddy 页分配器与 per-CPU slab 小对象分配器。
+
+## 总览
+
+当前实现由三层组成：
+
+1. `BuddyAllocator`
+   管理一段连续虚拟地址区间中的页，支持按 2 的幂分裂与合并。
+2. `SlabAllocator`
+   管理 `<= 2048` 字节的小对象，采用固定 size class。
+3. `GlobalAllocator`
+   将两者组合起来，对小对象走 per-CPU slab，对大对象走 buddy 页分配。
+
+更完整的设计细节见 [docs/design.md](docs/design.md)。
+
+## 架构图
+
+```mermaid
+flowchart TD
+    GA[GlobalAllocator] --> B[SpinMutex<BuddyAllocator>]
+    GA --> OS[OsImpl]
+    GA --> PCS[per_cpu_slabs: *mut SpinMutex<SlabAllocator>[]]
+
+    B --> PM[PageMeta[]]
+    B --> FL[按 order 的 free_lists]
+
+    PCS --> SA[SlabAllocator]
+    SA --> SC[9 个 SlabCache]
+    SC --> P[partial]
+    SC --> F[full]
+    SC --> E[empty]
+    SC --> H[SlabPageHeader]
+```
+
+### 分配路由
+
+```mermaid
+flowchart TD
+    A[GlobalAllocator::alloc(layout)] --> B{size <= 2048 且 align <= 2048?}
+    B -- 是 --> C[走当前 CPU 的 slab allocator]
+    C --> D{slab 直接命中?}
+    D -- 是 --> E[返回对象指针]
+    D -- 否 --> F[从 buddy 申请新 slab 页]
+    F --> G[add_slab 后重试]
+    G --> E
+    B -- 否 --> H[直接走 buddy 页分配]
+    H --> I[返回页级指针]
+```
+
+### 跨 CPU 释放
+
+```mermaid
+sequenceDiagram
+    participant CPU1 as 当前 CPU
+    participant H as SlabPageHeader
+    participant CPU0 as owner CPU
+    participant S as owner SlabAllocator
+
+    CPU1->>H: remote_free(obj_addr)
+    Note right of H: 无锁 CAS 推入 remote_free_head
+    CPU1-->>CPU1: 立即返回
+
+    CPU0->>S: 后续本地 alloc/dealloc
+    S->>H: drain_remote_frees()
+    H-->>S: 远程释放对象回收到本地 bitmap
+```
 
 ## 特性
 
-- Buddy 作为共享页分配后端
-- Slab 作为小对象分配前端
-- 多核 `GlobalAllocator` 门面：共享 Buddy + 每 CPU 一个 Slab
-- 全局 OS provider，用于获取当前 CPU
-- 可选 `tracking` 统计
-- 内置 `log` 支持
+- Buddy 页分配，支持拆分与合并
+- Slab 小对象分配，固定 9 个 size class：`8..=2048`
+- per-CPU slab cache
+- 跨 CPU 释放走 lock-free remote free
+- 支持 `alloc_pages_lowmem` 低地址页分配
+- 适合 `no_std`
+- 内置 `log` 日志支持
+- 可分别独立使用 `BuddyAllocator` 与 `SlabAllocator`
 
-## 快速开始
-
-### 添加依赖
+## 添加依赖
 
 ```toml
 [dependencies]
-buddy-slab-allocator = "0.1.0"
-buddy-slab-allocator = { version = "0.1.0", features = ["tracking"] }
+buddy-slab-allocator = "0.2.0"
 ```
 
-### 使用 `GlobalAllocator`
+## 使用 `GlobalAllocator`
 
 ```rust
 use buddy_slab_allocator::{GlobalAllocator, OsImpl};
@@ -30,91 +94,113 @@ use core::alloc::Layout;
 const PAGE_SIZE: usize = 0x1000;
 
 struct DemoOs;
+
 impl OsImpl for DemoOs {
-    fn current_cpu_idx(&self) -> usize {
-        0
-    }
-    fn virt_to_phys(&self, vaddr: usize) -> usize {
-        vaddr
-    }
-    fn phys_to_virt(&self, paddr: usize) -> usize {
-        paddr
-    }
+    fn current_cpu_idx(&self) -> usize { 0 }
+    fn virt_to_phys(&self, vaddr: usize) -> usize { vaddr }
 }
 
 static OS: DemoOs = DemoOs;
 
 let allocator = GlobalAllocator::<PAGE_SIZE>::new();
-let region_start = 0x8000_0000;
+let region_start = 0x8000_0000 as *mut u8;
 let region_size = 16 * 1024 * 1024;
+let region = unsafe { core::slice::from_raw_parts_mut(region_start, region_size) };
 
 unsafe {
-    allocator
-        .init(region_start, region_size, 1, &OS)
-        .unwrap();
+    allocator.init(region, 1, &OS).unwrap();
 }
 
 let layout = Layout::from_size_align(64, 8).unwrap();
 let ptr = allocator.alloc(layout).unwrap();
-allocator.dealloc(ptr, layout);
+
+unsafe {
+    allocator.dealloc(ptr, layout);
+}
 ```
 
-### 分别使用 Buddy 与 Slab
+## 分别使用 Buddy 与 Slab
+
+如果需要更底层的控制，也可以分别使用这两个组件。
 
 ```rust
 use buddy_slab_allocator::{
-    CompositePageAllocator, SlabAllocDecision, SlabByteAllocator, SlabDeallocDecision,
+    BuddyAllocator, SlabAllocResult, SlabAllocator, SlabDeallocResult,
 };
 use core::alloc::Layout;
 
 const PAGE_SIZE: usize = 0x1000;
-let mut page_alloc = CompositePageAllocator::<PAGE_SIZE>::new();
-page_alloc.init(0x8000_0000, 16 * 1024 * 1024);
+const HEAP_SIZE: usize = 16 * 1024 * 1024;
 
-let mut slab_alloc = SlabByteAllocator::<PAGE_SIZE>::new();
+let heap_start = 0x8000_0000usize;
+let meta_size = BuddyAllocator::<PAGE_SIZE>::required_meta_size(HEAP_SIZE);
+let meta_ptr = 0x9000_0000 as *mut u8;
+
+let mut buddy = BuddyAllocator::<PAGE_SIZE>::new();
+unsafe {
+    buddy.init(meta_ptr, meta_size, heap_start, HEAP_SIZE, None).unwrap();
+}
+
+let mut slab = SlabAllocator::<PAGE_SIZE>::new();
 let layout = Layout::from_size_align(64, 8).unwrap();
 
 let ptr = loop {
-    match slab_alloc.alloc(layout).unwrap() {
-        SlabAllocDecision::Allocated(ptr, _) => break ptr,
-        SlabAllocDecision::NeedsRefill {
-            size_class,
-            page_count,
-            slab_bytes,
-        } => {
-            let slab_base = page_alloc.alloc_pages(page_count, slab_bytes).unwrap();
-            slab_alloc
-                .provide_slab(size_class, 0, slab_base, slab_bytes)
-                .unwrap();
+    match slab.alloc(layout).unwrap() {
+        SlabAllocResult::Allocated(ptr) => break ptr,
+        SlabAllocResult::NeedsSlab { size_class, pages } => {
+            let slab_bytes = pages * PAGE_SIZE;
+            let addr = buddy.alloc_pages(pages, slab_bytes).unwrap();
+            slab.add_slab(size_class, addr, slab_bytes, 0);
         }
     }
 };
 
-if let SlabDeallocDecision::ReleaseSlab {
-    slab_base,
-    page_count,
-    ..
-} = slab_alloc.dealloc(ptr, layout)
-{
-    page_alloc.dealloc_pages(slab_base, page_count);
+match slab.dealloc(ptr, layout) {
+    SlabDeallocResult::Done => {}
+    SlabDeallocResult::FreeSlab { base, pages } => {
+        buddy.dealloc_pages(base, pages);
+    }
 }
 ```
+
+## 公开 API 摘要
+
+- `GlobalAllocator<PAGE_SIZE>`
+  高层门面，也可以作为 `GlobalAlloc` 使用。
+- `BuddyAllocator<PAGE_SIZE>`
+  独立页分配器。
+- `SlabAllocator<PAGE_SIZE>`
+  独立 slab 分配器。
+- `SizeClass`
+  slab 使用的固定对象尺寸类。
+- `SlabAllocResult`
+  `Allocated(ptr)` 或 `NeedsSlab { size_class, pages }`。
+- `SlabDeallocResult`
+  `Done` 或 `FreeSlab { base, pages }`。
+- `OsImpl`
+  提供 `current_cpu_idx()` 和 `virt_to_phys()`，用于 per-CPU 路由与 lowmem 选择。
 
 ## 测试
 
 ```bash
+# 常规测试
 cargo test
-cargo test --features tracking
-```
 
-## Benchmark
+# 串行执行，便于排查问题
+cargo test -- --test-threads=1
 
-```bash
+# 运行忽略的压力测试
+cargo test --test stress_test -- --ignored --nocapture
+
+# 检查 benchmark 是否可编译
 cargo check --benches
+
+# 运行 benchmark
 cargo bench
-cargo bench --bench buddy_allocator
-cargo bench --bench slab_allocator
-cargo bench --bench global_allocator
 ```
 
-Benchmark 基于 `divan`，说明见 `benches/README_CN.md`。
+更多测试说明见 [tests/README.md](tests/README.md)。
+
+## 许可证
+
+采用 [Apache-2.0](LICENSE) 许可证。

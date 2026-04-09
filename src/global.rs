@@ -345,7 +345,6 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
                 SlabDeallocResult::Done => {}
                 SlabDeallocResult::FreeSlab { base, pages } => {
                     drop(slab);
-                    self.buddy.lock().set_page_flags(base, PageFlags::Free);
                     self.buddy.lock().dealloc_pages(base, pages);
                 }
             }

@@ -37,7 +37,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run clippy
-        run: cargo clippy --features tracking -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
   build:
     name: Build
@@ -55,7 +55,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build library
-        run: cargo build --features tracking
+        run: cargo build
 
   doc:
     name: Documentation
@@ -73,7 +73,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build documentation
-        run: cargo doc --no-deps --features tracking
+        run: cargo doc --no-deps
 
   bench-check:
     name: Bench Compile Check
