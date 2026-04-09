@@ -79,7 +79,7 @@ impl HostRegion {
     }
 
     pub unsafe fn subslice(&mut self, offset: usize, len: usize) -> &mut [u8] {
-        std::slice::from_raw_parts_mut(self.ptr.add(offset), len)
+        unsafe { std::slice::from_raw_parts_mut(self.ptr.add(offset), len) }
     }
 }
 

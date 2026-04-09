@@ -401,11 +401,11 @@ fn stress_multithread_exhaustion_recovery() {
                 }
 
                 barrier.wait();
-                if cpu == 0 {
-                    if let Ok(ptr) = allocator.alloc(layout) {
-                        recovered.store(true, Ordering::Relaxed);
-                        unsafe { allocator.dealloc(ptr, layout) };
-                    }
+                if cpu == 0
+                    && let Ok(ptr) = allocator.alloc(layout)
+                {
+                    recovered.store(true, Ordering::Relaxed);
+                    unsafe { allocator.dealloc(ptr, layout) };
                 }
 
                 barrier.wait();
