@@ -27,14 +27,16 @@ impl ListHead {
     /// # Safety
     /// `base` must point to a valid `SlabPageHeader`.
     unsafe fn push_front(&mut self, base: usize) {
-        let hdr = &mut *(base as *mut SlabPageHeader);
-        hdr.list_prev = 0;
-        hdr.list_next = self.first;
-        if self.first != 0 {
-            let old = &mut *(self.first as *mut SlabPageHeader);
-            old.list_prev = base;
+        unsafe {
+            let hdr = &mut *(base as *mut SlabPageHeader);
+            hdr.list_prev = 0;
+            hdr.list_next = self.first;
+            if self.first != 0 {
+                let old = &mut *(self.first as *mut SlabPageHeader);
+                old.list_prev = base;
+            }
+            self.first = base;
         }
-        self.first = base;
     }
 
     /// Remove a slab page from this list.
@@ -42,32 +44,36 @@ impl ListHead {
     /// # Safety
     /// `base` must be in this list.
     unsafe fn remove(&mut self, base: usize) {
-        let hdr = &*(base as *const SlabPageHeader);
-        let prev = hdr.list_prev;
-        let next = hdr.list_next;
+        unsafe {
+            let hdr = &*(base as *const SlabPageHeader);
+            let prev = hdr.list_prev;
+            let next = hdr.list_next;
 
-        if prev != 0 {
-            (*(prev as *mut SlabPageHeader)).list_next = next;
-        } else {
-            self.first = next;
+            if prev != 0 {
+                (*(prev as *mut SlabPageHeader)).list_next = next;
+            } else {
+                self.first = next;
+            }
+            if next != 0 {
+                (*(next as *mut SlabPageHeader)).list_prev = prev;
+            }
+            // Clear links
+            let hdr = &mut *(base as *mut SlabPageHeader);
+            hdr.list_prev = 0;
+            hdr.list_next = 0;
         }
-        if next != 0 {
-            (*(next as *mut SlabPageHeader)).list_prev = prev;
-        }
-        // Clear links
-        let hdr = &mut *(base as *mut SlabPageHeader);
-        hdr.list_prev = 0;
-        hdr.list_next = 0;
     }
 
     /// Pop the first page from the list.  Returns 0 if empty.
     unsafe fn pop_front(&mut self) -> usize {
-        if self.first == 0 {
-            return 0;
+        unsafe {
+            if self.first == 0 {
+                return 0;
+            }
+            let base = self.first;
+            self.remove(base);
+            base
         }
-        let base = self.first;
-        self.remove(base);
-        base
     }
 }
 

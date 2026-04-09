@@ -172,61 +172,63 @@ impl BuddySection {
         heap_start: usize,
         heap_size: usize,
     ) -> AllocResult {
-        if !PAGE_SIZE.is_power_of_two() {
-            return Err(AllocError::InvalidParam);
-        }
-        if !is_aligned(heap_start, PAGE_SIZE) || heap_size == 0 {
-            return Err(AllocError::InvalidParam);
-        }
-
-        let total_pages = heap_size / PAGE_SIZE;
-        let required = BuddyAllocator::<PAGE_SIZE>::required_meta_size(heap_size);
-        if meta_size < required {
-            return Err(AllocError::InvalidParam);
-        }
-
-        let meta = meta_ptr as *mut PageMeta;
-        for i in 0..total_pages {
-            meta.add(i).write(PageMeta::new());
-        }
-
-        section_ptr.write(BuddySection {
-            next: ptr::null_mut(),
-            region_start,
-            region_size,
-            meta,
-            max_pages: total_pages,
-            heap_start,
-            heap_size,
-            free_lists: [PFN_NONE; MAX_ORDER + 1],
-            free_pages: 0,
-            total_pages,
-        });
-
-        let section = &mut *section_ptr;
-        let mut pfn: usize = 0;
-        while pfn < total_pages {
-            let mut order = MAX_ORDER;
-            loop {
-                let block_pages = 1usize << order;
-                if block_pages <= total_pages - pfn && (pfn & (block_pages - 1)) == 0 {
-                    break;
-                }
-                if order == 0 {
-                    break;
-                }
-                order -= 1;
+        unsafe {
+            if !PAGE_SIZE.is_power_of_two() {
+                return Err(AllocError::InvalidParam);
             }
-            let block_pages = 1usize << order;
-            let m = &mut *section.meta.add(pfn);
-            m.flags = PageFlags::Free;
-            m.order = order as u8;
-            free_list_push(section.meta, &mut section.free_lists, pfn as u32, order);
-            section.free_pages += block_pages;
-            pfn += block_pages;
-        }
+            if !is_aligned(heap_start, PAGE_SIZE) || heap_size == 0 {
+                return Err(AllocError::InvalidParam);
+            }
 
-        Ok(())
+            let total_pages = heap_size / PAGE_SIZE;
+            let required = BuddyAllocator::<PAGE_SIZE>::required_meta_size(heap_size);
+            if meta_size < required {
+                return Err(AllocError::InvalidParam);
+            }
+
+            let meta = meta_ptr as *mut PageMeta;
+            for i in 0..total_pages {
+                meta.add(i).write(PageMeta::new());
+            }
+
+            section_ptr.write(BuddySection {
+                next: ptr::null_mut(),
+                region_start,
+                region_size,
+                meta,
+                max_pages: total_pages,
+                heap_start,
+                heap_size,
+                free_lists: [PFN_NONE; MAX_ORDER + 1],
+                free_pages: 0,
+                total_pages,
+            });
+
+            let section = &mut *section_ptr;
+            let mut pfn: usize = 0;
+            while pfn < total_pages {
+                let mut order = MAX_ORDER;
+                loop {
+                    let block_pages = 1usize << order;
+                    if block_pages <= total_pages - pfn && (pfn & (block_pages - 1)) == 0 {
+                        break;
+                    }
+                    if order == 0 {
+                        break;
+                    }
+                    order -= 1;
+                }
+                let block_pages = 1usize << order;
+                let m = &mut *section.meta.add(pfn);
+                m.flags = PageFlags::Free;
+                m.order = order as u8;
+                free_list_push(section.meta, &mut section.free_lists, pfn as u32, order);
+                section.free_pages += block_pages;
+                pfn += block_pages;
+            }
+
+            Ok(())
+        }
     }
 
     #[inline]
@@ -301,8 +303,10 @@ impl<const PAGE_SIZE: usize> BuddyAllocator<PAGE_SIZE> {
         region: &mut [u8],
         os: Option<&'static dyn OsImpl>,
     ) -> AllocResult {
-        self.reset(os);
-        self.add_region(region)
+        unsafe {
+            self.reset(os);
+            self.add_region(region)
+        }
     }
 
     /// Add a new managed region after initialisation.
@@ -311,76 +315,81 @@ impl<const PAGE_SIZE: usize> BuddyAllocator<PAGE_SIZE> {
     /// - `region` must be writable and remain valid for the lifetime of this allocator.
     /// - The region must not overlap any existing managed region.
     pub unsafe fn add_region(&mut self, region: &mut [u8]) -> AllocResult {
-        let region_start = region.as_mut_ptr() as usize;
-        let region_size = region.len();
-        let layout = BuddySection::compute_region_layout::<PAGE_SIZE>(region_start, region_size)
-            .ok_or(AllocError::InvalidParam)?;
-        self.add_region_raw(SectionInitSpec {
-            region_start,
-            region_size,
-            section_ptr: layout.section_start as *mut BuddySection,
-            meta_ptr: layout.meta_start as *mut u8,
-            meta_size: Self::required_meta_size(layout.managed_heap_size),
-            heap_start: layout.managed_heap_start,
-            heap_size: layout.managed_heap_size,
-        })
+        unsafe {
+            let region_start = region.as_mut_ptr() as usize;
+            let region_size = region.len();
+            let layout =
+                BuddySection::compute_region_layout::<PAGE_SIZE>(region_start, region_size)
+                    .ok_or(AllocError::InvalidParam)?;
+            self.add_region_raw(SectionInitSpec {
+                region_start,
+                region_size,
+                section_ptr: layout.section_start as *mut BuddySection,
+                meta_ptr: layout.meta_start as *mut u8,
+                meta_size: Self::required_meta_size(layout.managed_heap_size),
+                heap_start: layout.managed_heap_start,
+                heap_size: layout.managed_heap_size,
+            })
+        }
     }
 
     pub(crate) unsafe fn add_region_raw(&mut self, spec: SectionInitSpec) -> AllocResult {
-        let region_size = spec.region_size;
-        let region_end = spec
-            .region_start
-            .checked_add(region_size)
-            .ok_or(AllocError::InvalidParam)?;
-        let heap_end = spec
-            .heap_start
-            .checked_add(spec.heap_size)
-            .ok_or(AllocError::InvalidParam)?;
-        if heap_end > region_end {
-            return Err(AllocError::InvalidParam);
-        }
-
-        let mut section = self.sections_head;
-        while !section.is_null() {
-            let existing = &*section;
-            let existing_end = existing
+        unsafe {
+            let region_size = spec.region_size;
+            let region_end = spec
                 .region_start
-                .checked_add(existing.region_size)
+                .checked_add(region_size)
                 .ok_or(AllocError::InvalidParam)?;
-            if spec.region_start < existing_end && existing.region_start < region_end {
-                return Err(AllocError::MemoryOverlap);
+            let heap_end = spec
+                .heap_start
+                .checked_add(spec.heap_size)
+                .ok_or(AllocError::InvalidParam)?;
+            if heap_end > region_end {
+                return Err(AllocError::InvalidParam);
             }
-            section = existing.next;
+
+            let mut section = self.sections_head;
+            while !section.is_null() {
+                let existing = &*section;
+                let existing_end = existing
+                    .region_start
+                    .checked_add(existing.region_size)
+                    .ok_or(AllocError::InvalidParam)?;
+                if spec.region_start < existing_end && existing.region_start < region_end {
+                    return Err(AllocError::MemoryOverlap);
+                }
+                section = existing.next;
+            }
+
+            BuddySection::init_at::<PAGE_SIZE>(
+                spec.section_ptr,
+                spec.region_start,
+                spec.region_size,
+                spec.meta_ptr,
+                spec.meta_size,
+                spec.heap_start,
+                spec.heap_size,
+            )?;
+
+            if self.sections_head.is_null() {
+                self.sections_head = spec.section_ptr;
+            } else {
+                (*self.sections_tail).next = spec.section_ptr;
+            }
+            self.sections_tail = spec.section_ptr;
+            self.section_count += 1;
+
+            log::debug!(
+                "BuddyAllocator: add section region {:#x}+{:#x}, heap {:#x}..{:#x}, {} pages",
+                spec.region_start,
+                spec.region_size,
+                spec.heap_start,
+                heap_end,
+                spec.heap_size / PAGE_SIZE,
+            );
+
+            Ok(())
         }
-
-        BuddySection::init_at::<PAGE_SIZE>(
-            spec.section_ptr,
-            spec.region_start,
-            spec.region_size,
-            spec.meta_ptr,
-            spec.meta_size,
-            spec.heap_start,
-            spec.heap_size,
-        )?;
-
-        if self.sections_head.is_null() {
-            self.sections_head = spec.section_ptr;
-        } else {
-            (*self.sections_tail).next = spec.section_ptr;
-        }
-        self.sections_tail = spec.section_ptr;
-        self.section_count += 1;
-
-        log::debug!(
-            "BuddyAllocator: add section region {:#x}+{:#x}, heap {:#x}..{:#x}, {} pages",
-            spec.region_start,
-            spec.region_size,
-            spec.heap_start,
-            heap_end,
-            spec.heap_size / PAGE_SIZE,
-        );
-
-        Ok(())
     }
 
     /// Number of managed sections.
@@ -642,12 +651,14 @@ impl<const PAGE_SIZE: usize> BuddyAllocator<PAGE_SIZE> {
     /// # Safety
     /// The caller must ensure `addr` is valid and properly allocated.
     pub unsafe fn set_page_flags(&mut self, addr: usize, flags: PageFlags) -> AllocResult {
-        let section = self
-            .find_section_by_addr_mut(addr)
-            .ok_or(AllocError::NotFound)?;
-        let pfn = (addr - section.heap_start) / PAGE_SIZE;
-        (*section.meta.add(pfn)).flags = flags;
-        Ok(())
+        unsafe {
+            let section = self
+                .find_section_by_addr_mut(addr)
+                .ok_or(AllocError::NotFound)?;
+            let pfn = (addr - section.heap_start) / PAGE_SIZE;
+            (*section.meta.add(pfn)).flags = flags;
+            Ok(())
+        }
     }
 
     /// Read the flags of the page containing `addr`.

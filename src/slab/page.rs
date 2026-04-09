@@ -198,17 +198,19 @@ impl SlabPageHeader {
     /// - The object's first `size_of::<usize>()` bytes will be overwritten with
     ///   the next-pointer.
     pub unsafe fn remote_free(&self, obj_addr: usize) {
-        loop {
-            let old_head = self.remote_free_head.load(Ordering::Acquire);
-            // Store "next" pointer inside the freed object.
-            (obj_addr as *mut usize).write(old_head);
-            if self
-                .remote_free_head
-                .compare_exchange_weak(old_head, obj_addr, Ordering::AcqRel, Ordering::Relaxed)
-                .is_ok()
-            {
-                self.remote_free_count.fetch_add(1, Ordering::Relaxed);
-                return;
+        unsafe {
+            loop {
+                let old_head = self.remote_free_head.load(Ordering::Acquire);
+                // Store "next" pointer inside the freed object.
+                (obj_addr as *mut usize).write(old_head);
+                if self
+                    .remote_free_head
+                    .compare_exchange_weak(old_head, obj_addr, Ordering::AcqRel, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    self.remote_free_count.fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
             }
         }
     }

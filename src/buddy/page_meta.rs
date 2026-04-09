@@ -69,14 +69,16 @@ impl PageMeta {
 /// `pfn` must not already be in any free list.
 #[inline]
 pub unsafe fn free_list_push(meta: *mut PageMeta, free_lists: &mut [u32], pfn: u32, order: usize) {
-    let old_head = free_lists[order];
-    let m = &mut *meta.add(pfn as usize);
-    m.prev = PFN_NONE;
-    m.next = old_head;
-    if old_head != PFN_NONE {
-        (*meta.add(old_head as usize)).prev = pfn;
+    unsafe {
+        let old_head = free_lists[order];
+        let m = &mut *meta.add(pfn as usize);
+        m.prev = PFN_NONE;
+        m.next = old_head;
+        if old_head != PFN_NONE {
+            (*meta.add(old_head as usize)).prev = pfn;
+        }
+        free_lists[order] = pfn;
     }
-    free_lists[order] = pfn;
 }
 
 /// Pop the first PFN from `free_lists[order]`, returning `PFN_NONE` if empty.
@@ -85,19 +87,21 @@ pub unsafe fn free_list_push(meta: *mut PageMeta, free_lists: &mut [u32], pfn: u
 /// `meta` must be a valid metadata array.
 #[inline]
 pub unsafe fn free_list_pop(meta: *mut PageMeta, free_lists: &mut [u32], order: usize) -> u32 {
-    let head = free_lists[order];
-    if head == PFN_NONE {
-        return PFN_NONE;
+    unsafe {
+        let head = free_lists[order];
+        if head == PFN_NONE {
+            return PFN_NONE;
+        }
+        let m = &mut *meta.add(head as usize);
+        let next = m.next;
+        m.prev = PFN_NONE;
+        m.next = PFN_NONE;
+        if next != PFN_NONE {
+            (*meta.add(next as usize)).prev = PFN_NONE;
+        }
+        free_lists[order] = next;
+        head
     }
-    let m = &mut *meta.add(head as usize);
-    let next = m.next;
-    m.prev = PFN_NONE;
-    m.next = PFN_NONE;
-    if next != PFN_NONE {
-        (*meta.add(next as usize)).prev = PFN_NONE;
-    }
-    free_lists[order] = next;
-    head
 }
 
 /// Remove `pfn` from the free list at `order`.
@@ -111,21 +115,23 @@ pub unsafe fn free_list_remove(
     pfn: u32,
     order: usize,
 ) {
-    let m = &*meta.add(pfn as usize);
-    let prev = m.prev;
-    let next = m.next;
+    unsafe {
+        let m = &*meta.add(pfn as usize);
+        let prev = m.prev;
+        let next = m.next;
 
-    if prev != PFN_NONE {
-        (*meta.add(prev as usize)).next = next;
-    } else {
-        // pfn was the head
-        free_lists[order] = next;
-    }
-    if next != PFN_NONE {
-        (*meta.add(next as usize)).prev = prev;
-    }
+        if prev != PFN_NONE {
+            (*meta.add(prev as usize)).next = next;
+        } else {
+            // pfn was the head
+            free_lists[order] = next;
+        }
+        if next != PFN_NONE {
+            (*meta.add(next as usize)).prev = prev;
+        }
 
-    let m = &mut *meta.add(pfn as usize);
-    m.prev = PFN_NONE;
-    m.next = PFN_NONE;
+        let m = &mut *meta.add(pfn as usize);
+        m.prev = PFN_NONE;
+        m.next = PFN_NONE;
+    }
 }

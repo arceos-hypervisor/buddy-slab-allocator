@@ -183,51 +183,53 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
         cpu_count: usize,
         os: &'static dyn OsImpl,
     ) -> AllocResult {
-        let region_start = region.as_mut_ptr() as usize;
-        let region_size = region.len();
-        let layout = Self::compute_initial_region_layout(region_start, region_size, cpu_count)
-            .ok_or(AllocError::InvalidParam)?;
-        let section_ptr = layout.section_start as *mut BuddySection;
-        let meta_ptr = layout.meta_start as *mut u8;
-        let slab_ptr =
-            (layout.section_start + layout.slab_offset) as *mut SpinMutex<SlabAllocator<PAGE_SIZE>>;
+        unsafe {
+            let region_start = region.as_mut_ptr() as usize;
+            let region_size = region.len();
+            let layout = Self::compute_initial_region_layout(region_start, region_size, cpu_count)
+                .ok_or(AllocError::InvalidParam)?;
+            let section_ptr = layout.section_start as *mut BuddySection;
+            let meta_ptr = layout.meta_start as *mut u8;
+            let slab_ptr = (layout.section_start + layout.slab_offset)
+                as *mut SpinMutex<SlabAllocator<PAGE_SIZE>>;
 
-        let mut buddy = self.buddy.lock();
-        buddy.reset(Some(os));
-        buddy.add_region_raw(SectionInitSpec {
-            region_start,
-            region_size,
-            section_ptr,
-            meta_ptr,
-            meta_size: layout.buddy_meta_size,
-            heap_start: layout.managed_heap_start,
-            heap_size: layout.managed_heap_size,
-        })?;
-        drop(buddy);
+            let mut buddy = self.buddy.lock();
+            buddy.reset(Some(os));
+            buddy.add_region_raw(SectionInitSpec {
+                region_start,
+                region_size,
+                section_ptr,
+                meta_ptr,
+                meta_size: layout.buddy_meta_size,
+                heap_start: layout.managed_heap_start,
+                heap_size: layout.managed_heap_size,
+            })?;
+            drop(buddy);
 
-        for i in 0..cpu_count {
-            let slot = slab_ptr.add(i);
-            slot.write(SpinMutex::new(SlabAllocator::new()));
+            for i in 0..cpu_count {
+                let slot = slab_ptr.add(i);
+                slot.write(SpinMutex::new(SlabAllocator::new()));
+            }
+
+            let self_mut = self as *const Self as *mut Self;
+            (*self_mut).per_cpu_slabs = slab_ptr;
+            (*self_mut).cpu_count = cpu_count;
+            (*self_mut).os = Some(os);
+            self.initialized.store(true, Ordering::Release);
+
+            log::debug!(
+                "GlobalAllocator: {} CPUs, region {:#x}+{:#x}, meta {:#x}+{:#x}, first heap {:#x}+{:#x}",
+                cpu_count,
+                region_start,
+                region_size,
+                layout.section_start,
+                layout.meta_size,
+                layout.managed_heap_start,
+                layout.managed_heap_size,
+            );
+
+            Ok(())
         }
-
-        let self_mut = self as *const Self as *mut Self;
-        (*self_mut).per_cpu_slabs = slab_ptr;
-        (*self_mut).cpu_count = cpu_count;
-        (*self_mut).os = Some(os);
-        self.initialized.store(true, Ordering::Release);
-
-        log::debug!(
-            "GlobalAllocator: {} CPUs, region {:#x}+{:#x}, meta {:#x}+{:#x}, first heap {:#x}+{:#x}",
-            cpu_count,
-            region_start,
-            region_size,
-            layout.section_start,
-            layout.meta_size,
-            layout.managed_heap_start,
-            layout.managed_heap_size,
-        );
-
-        Ok(())
     }
 
     /// Add a new managed region after [`init`](Self::init).
@@ -236,10 +238,12 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
     /// - `region` must be writable and remain valid for the lifetime of this allocator.
     /// - The region must not overlap any already managed region.
     pub unsafe fn add_region(&self, region: &mut [u8]) -> AllocResult {
-        if !self.initialized.load(Ordering::Acquire) {
-            return Err(AllocError::NotInitialized);
+        unsafe {
+            if !self.initialized.load(Ordering::Acquire) {
+                return Err(AllocError::NotInitialized);
+            }
+            self.buddy.lock().add_region(region)
         }
-        self.buddy.lock().add_region(region)
     }
 
     /// Number of managed sections.
@@ -300,10 +304,12 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
     /// # Safety
     /// `ptr` must have been returned by a prior `alloc` with the same `layout`.
     pub unsafe fn dealloc(&self, ptr: NonNull<u8>, layout: Layout) {
-        if self.is_slab_eligible(&layout) {
-            self.slab_dealloc(ptr, layout);
-        } else {
-            self.large_dealloc(ptr, layout);
+        unsafe {
+            if self.is_slab_eligible(&layout) {
+                self.slab_dealloc(ptr, layout);
+            } else {
+                self.large_dealloc(ptr, layout);
+            }
         }
     }
 
@@ -340,29 +346,31 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
     }
 
     unsafe fn slab_dealloc(&self, ptr: NonNull<u8>, layout: Layout) {
-        let os = self.os.expect("not initialized");
-        let sc = SizeClass::from_layout(layout).expect("layout exceeds slab");
-        let slab_bytes = sc.slab_pages(PAGE_SIZE) * PAGE_SIZE;
-        let base =
-            SlabPageHeader::base_from_obj_addr::<PAGE_SIZE>(ptr.as_ptr() as usize, slab_bytes);
-        let hdr = &*(base as *const SlabPageHeader);
-        debug_assert_eq!(hdr.magic, SLAB_MAGIC);
+        unsafe {
+            let os = self.os.expect("not initialized");
+            let sc = SizeClass::from_layout(layout).expect("layout exceeds slab");
+            let slab_bytes = sc.slab_pages(PAGE_SIZE) * PAGE_SIZE;
+            let base =
+                SlabPageHeader::base_from_obj_addr::<PAGE_SIZE>(ptr.as_ptr() as usize, slab_bytes);
+            let hdr = &*(base as *const SlabPageHeader);
+            debug_assert_eq!(hdr.magic, SLAB_MAGIC);
 
-        let owner_cpu = hdr.owner_cpu as usize;
-        let current_cpu = os.current_cpu_idx();
+            let owner_cpu = hdr.owner_cpu as usize;
+            let current_cpu = os.current_cpu_idx();
 
-        if owner_cpu == current_cpu {
-            let slab_lock = &*self.per_cpu_slabs.add(current_cpu);
-            let mut slab = slab_lock.lock();
-            match slab.dealloc(ptr, layout) {
-                SlabDeallocResult::Done => {}
-                SlabDeallocResult::FreeSlab { base, pages } => {
-                    drop(slab);
-                    self.buddy.lock().dealloc_pages(base, pages);
+            if owner_cpu == current_cpu {
+                let slab_lock = &*self.per_cpu_slabs.add(current_cpu);
+                let mut slab = slab_lock.lock();
+                match slab.dealloc(ptr, layout) {
+                    SlabDeallocResult::Done => {}
+                    SlabDeallocResult::FreeSlab { base, pages } => {
+                        drop(slab);
+                        self.buddy.lock().dealloc_pages(base, pages);
+                    }
                 }
+            } else {
+                hdr.remote_free(ptr.as_ptr() as usize);
             }
-        } else {
-            hdr.remote_free(ptr.as_ptr() as usize);
         }
     }
 
@@ -390,23 +398,27 @@ unsafe impl<const PAGE_SIZE: usize> GlobalAlloc for GlobalAllocator<PAGE_SIZE> {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        if let Some(nn) = NonNull::new(ptr) {
-            self.dealloc(nn, layout);
+        unsafe {
+            if let Some(nn) = NonNull::new(ptr) {
+                self.dealloc(nn, layout);
+            }
         }
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let new_layout = match Layout::from_size_align(new_size, layout.align()) {
-            Ok(l) => l,
-            Err(_) => return ptr::null_mut(),
-        };
+        unsafe {
+            let new_layout = match Layout::from_size_align(new_size, layout.align()) {
+                Ok(l) => l,
+                Err(_) => return ptr::null_mut(),
+            };
 
-        let new_ptr = <Self as GlobalAlloc>::alloc(self, new_layout);
-        if !new_ptr.is_null() {
-            let copy_size = layout.size().min(new_size);
-            ptr::copy_nonoverlapping(ptr, new_ptr, copy_size);
-            <Self as GlobalAlloc>::dealloc(self, ptr, layout);
+            let new_ptr = <Self as GlobalAlloc>::alloc(self, new_layout);
+            if !new_ptr.is_null() {
+                let copy_size = layout.size().min(new_size);
+                ptr::copy_nonoverlapping(ptr, new_ptr, copy_size);
+                <Self as GlobalAlloc>::dealloc(self, ptr, layout);
+            }
+            new_ptr
         }
-        new_ptr
     }
 }
