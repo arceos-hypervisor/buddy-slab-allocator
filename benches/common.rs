@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 
-use buddy_slab_allocator::{BuddyAllocator, GlobalAllocator, OsImpl, SlabAllocResult, SlabAllocator, SlabDeallocResult};
+use buddy_slab_allocator::{
+    BuddyAllocator, GlobalAllocator, OsImpl, SlabAllocResult, SlabAllocator, SlabDeallocResult,
+};
 use core::alloc::Layout;
 use rand::{rngs::StdRng, SeedableRng};
 use std::alloc::{alloc, dealloc};
@@ -150,7 +152,9 @@ impl GlobalHarness {
         let allocator = GlobalAllocator::<PAGE_SIZE>::new();
         MOCK_OS.set_cpu(0);
         unsafe {
-            allocator.init(region.as_mut_slice(), cpu_count, &MOCK_OS).unwrap();
+            allocator
+                .init(region.as_mut_slice(), cpu_count, &MOCK_OS)
+                .unwrap();
         }
         Self {
             _region: region,
