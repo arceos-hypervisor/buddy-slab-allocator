@@ -55,10 +55,7 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
         }
     }
 
-    fn metadata_layout_for_pages(
-        pages: usize,
-        cpu_count: usize,
-    ) -> Option<(usize, usize, usize)> {
+    fn metadata_layout_for_pages(pages: usize, cpu_count: usize) -> Option<(usize, usize, usize)> {
         let buddy_meta_size = pages.checked_mul(core::mem::size_of::<crate::buddy::PageMeta>())?;
         let slab_align = core::mem::align_of::<SpinMutex<SlabAllocator<PAGE_SIZE>>>();
         let slab_offset = align_up(buddy_meta_size, slab_align);
@@ -68,7 +65,11 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
         Some((buddy_meta_size, slab_offset, meta_size))
     }
 
-    fn available_heap_pages(region_end: usize, meta_start: usize, meta_size: usize) -> Option<usize> {
+    fn available_heap_pages(
+        region_end: usize,
+        meta_start: usize,
+        meta_size: usize,
+    ) -> Option<usize> {
         let managed_heap_start = align_up(meta_start.checked_add(meta_size)?, PAGE_SIZE);
         if managed_heap_start > region_end {
             return Some(0);
@@ -85,8 +86,7 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
         let Some((_, _, meta_size)) = Self::metadata_layout_for_pages(pages, cpu_count) else {
             return false;
         };
-        let Some(available_pages) =
-            Self::available_heap_pages(region_end, meta_start, meta_size)
+        let Some(available_pages) = Self::available_heap_pages(region_end, meta_start, meta_size)
         else {
             return false;
         };
@@ -190,8 +190,7 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
         let layout = Self::compute_region_layout(region_start, region_size, cpu_count)
             .ok_or(AllocError::InvalidParam)?;
         let meta_ptr = layout.meta_start as *mut u8;
-        let slab_ptr =
-            meta_ptr.add(layout.slab_offset) as *mut SpinMutex<SlabAllocator<PAGE_SIZE>>;
+        let slab_ptr = meta_ptr.add(layout.slab_offset) as *mut SpinMutex<SlabAllocator<PAGE_SIZE>>;
 
         // --- Init buddy ---
         let mut buddy = self.buddy.lock();

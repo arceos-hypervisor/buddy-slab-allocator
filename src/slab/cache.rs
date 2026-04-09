@@ -107,7 +107,13 @@ impl SlabCache {
             return Some(addr);
         }
 
-        // 2. Try recycling an empty slab.
+        // 2. A full slab may have gained free objects via lock-free remote frees.
+        if let Some(base) = self.reclaim_full_with_remote_frees() {
+            unsafe { self.partial.push_front(base) };
+            return self.try_alloc_from_partial::<PAGE_SIZE>();
+        }
+
+        // 3. Try recycling an empty slab.
         if !self.empty.is_empty() {
             let base = unsafe { self.empty.pop_front() };
             self.empty_count -= 1;
@@ -116,6 +122,23 @@ impl SlabCache {
             return self.try_alloc_from_partial::<PAGE_SIZE>();
         }
 
+        None
+    }
+
+    /// Drain remote frees from the first full slab that has them and move it
+    /// back to the partial list.
+    fn reclaim_full_with_remote_frees(&mut self) -> Option<usize> {
+        let mut base = self.full.first;
+        while base != 0 {
+            let next = unsafe { (*(base as *const SlabPageHeader)).list_next };
+            let hdr = unsafe { &mut *(base as *mut SlabPageHeader) };
+            if hdr.has_remote_frees() {
+                hdr.drain_remote_frees(base);
+                unsafe { self.full.remove(base) };
+                return Some(base);
+            }
+            base = next;
+        }
         None
     }
 

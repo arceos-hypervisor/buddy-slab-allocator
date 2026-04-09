@@ -62,13 +62,13 @@ impl Drop for TestHeap {
     }
 }
 
-fn init_allocator(
-    allocator: &GlobalAllocator<PAGE_SIZE>,
-    heap: &TestHeap,
-    cpu_count: usize,
-) {
+fn init_allocator(allocator: &GlobalAllocator<PAGE_SIZE>, heap: &TestHeap, cpu_count: usize) {
     MOCK_OS.set_cpu(0);
-    unsafe { allocator.init(heap.addr(), HEAP_SIZE, cpu_count, &MOCK_OS).unwrap() };
+    unsafe {
+        allocator
+            .init(heap.addr(), HEAP_SIZE, cpu_count, &MOCK_OS)
+            .unwrap()
+    };
 }
 
 #[test]

@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{GlobalHarness, MOCK_OS, HEAP_SIZE, OPERATIONS_PER_BATCH, PAGE_SIZE};
+use common::{GlobalHarness, HEAP_SIZE, MOCK_OS, OPERATIONS_PER_BATCH, PAGE_SIZE};
 use core::alloc::Layout;
 use divan::{black_box, Bencher};
 

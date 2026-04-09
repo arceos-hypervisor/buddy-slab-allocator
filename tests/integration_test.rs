@@ -3,8 +3,8 @@
 extern crate buddy_slab_allocator;
 
 use buddy_slab_allocator::{
-    AllocError, BuddyAllocator, GlobalAllocator, OsImpl, SizeClass, SlabAllocResult, SlabAllocator,
-    SlabDeallocResult,
+    slab::SlabPageHeader, AllocError, BuddyAllocator, GlobalAllocator, OsImpl, SizeClass,
+    SlabAllocResult, SlabAllocator, SlabDeallocResult,
 };
 use core::alloc::Layout;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -366,7 +366,11 @@ fn init_global(
     region_size: usize,
     cpu_count: usize,
 ) {
-    unsafe { allocator.init(region_start, region_size, cpu_count, &TEST_OS).unwrap() };
+    unsafe {
+        allocator
+            .init(region_start, region_size, cpu_count, &TEST_OS)
+            .unwrap()
+    };
 }
 
 #[test]
@@ -469,6 +473,90 @@ fn global_cross_cpu_free() {
 }
 
 #[test]
+fn global_cross_cpu_free_drains_remote_queue() {
+    let (region_ptr, region_layout) = host_alloc(TEST_HEAP_SIZE, PAGE_SIZE * 4);
+    let allocator = GlobalAllocator::<PAGE_SIZE>::new();
+    init_global(&allocator, region_ptr as usize, TEST_HEAP_SIZE, 2);
+
+    TEST_OS.set_cpu(0);
+    let layout = Layout::from_size_align(64, 8).unwrap();
+    let ptr = allocator.alloc(layout).unwrap();
+
+    let slab_bytes = SizeClass::from_layout(layout)
+        .unwrap()
+        .slab_pages(PAGE_SIZE)
+        * PAGE_SIZE;
+    let base = SlabPageHeader::base_from_obj_addr::<PAGE_SIZE>(ptr.as_ptr() as usize, slab_bytes);
+    let hdr = unsafe { &*(base as *const SlabPageHeader) };
+    assert_eq!(hdr.owner_cpu, 0);
+    assert_eq!(hdr.remote_free_count.load(Ordering::Relaxed), 0);
+
+    TEST_OS.set_cpu(1);
+    unsafe { allocator.dealloc(ptr, layout) };
+    assert_eq!(hdr.remote_free_count.load(Ordering::Relaxed), 1);
+    assert_ne!(hdr.remote_free_head.load(Ordering::Relaxed), 0);
+
+    TEST_OS.set_cpu(0);
+    let ptr2 = allocator.alloc(layout).unwrap();
+    assert_eq!(hdr.remote_free_count.load(Ordering::Relaxed), 0);
+    assert_eq!(hdr.remote_free_head.load(Ordering::Relaxed), 0);
+    unsafe { allocator.dealloc(ptr2, layout) };
+
+    host_dealloc(region_ptr, region_layout);
+}
+
+#[test]
+fn global_cross_cpu_free_multiple_rounds_same_slab() {
+    let (region_ptr, region_layout) = host_alloc(TEST_HEAP_SIZE, PAGE_SIZE * 4);
+    let allocator = GlobalAllocator::<PAGE_SIZE>::new();
+    init_global(&allocator, region_ptr as usize, TEST_HEAP_SIZE, 2);
+
+    let layout = Layout::from_size_align(64, 8).unwrap();
+
+    TEST_OS.set_cpu(0);
+    let first = allocator.alloc(layout).unwrap();
+    let slab_bytes = SizeClass::from_layout(layout)
+        .unwrap()
+        .slab_pages(PAGE_SIZE)
+        * PAGE_SIZE;
+    let base = SlabPageHeader::base_from_obj_addr::<PAGE_SIZE>(first.as_ptr() as usize, slab_bytes);
+    let hdr = unsafe { &*(base as *const SlabPageHeader) };
+    let object_count = hdr.object_count as usize;
+    let mut ptrs = Vec::with_capacity(object_count);
+    ptrs.push(first);
+    for _ in 1..object_count {
+        let ptr = allocator.alloc(layout).unwrap();
+        let ptr_base =
+            SlabPageHeader::base_from_obj_addr::<PAGE_SIZE>(ptr.as_ptr() as usize, slab_bytes);
+        assert_eq!(ptr_base, base);
+        ptrs.push(ptr);
+    }
+
+    TEST_OS.set_cpu(1);
+    for &ptr in &ptrs {
+        unsafe { allocator.dealloc(ptr, layout) };
+    }
+    assert_eq!(
+        hdr.remote_free_count.load(Ordering::Relaxed) as usize,
+        object_count
+    );
+
+    TEST_OS.set_cpu(0);
+    let mut drained = Vec::with_capacity(object_count);
+    for _ in 0..object_count {
+        drained.push(allocator.alloc(layout).unwrap());
+    }
+    assert_eq!(hdr.remote_free_count.load(Ordering::Relaxed), 0);
+    assert_eq!(hdr.remote_free_head.load(Ordering::Relaxed), 0);
+
+    for ptr in drained {
+        unsafe { allocator.dealloc(ptr, layout) };
+    }
+
+    host_dealloc(region_ptr, region_layout);
+}
+
+#[test]
 fn global_lowmem_pages() {
     // Use a custom OsImpl that maps virt addresses below 4 GiB so lowmem
     // allocation can succeed on 64-bit hosts where heap addresses are > 4 GiB.
@@ -489,7 +577,11 @@ fn global_lowmem_pages() {
     let (region_ptr, region_layout) = host_alloc(TEST_HEAP_SIZE, PAGE_SIZE * 4);
     let region_addr = region_ptr as usize;
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    unsafe { allocator.init(region_addr, TEST_HEAP_SIZE, 1, &LOWMEM_OS).unwrap() };
+    unsafe {
+        allocator
+            .init(region_addr, TEST_HEAP_SIZE, 1, &LOWMEM_OS)
+            .unwrap()
+    };
 
     let addr = allocator.alloc_pages_lowmem(1, PAGE_SIZE).unwrap();
     assert!(addr >= allocator.managed_heap_start());

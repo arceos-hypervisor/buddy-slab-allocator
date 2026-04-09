@@ -2,7 +2,9 @@
 
 mod common;
 
-use common::{seeded_rng, BuddyHarness, FRAGMENTATION_PAGES, HEAP_SIZE, OPERATIONS_PER_BATCH, PAGE_SIZE};
+use common::{
+    seeded_rng, BuddyHarness, FRAGMENTATION_PAGES, HEAP_SIZE, OPERATIONS_PER_BATCH, PAGE_SIZE,
+};
 use divan::{black_box, Bencher};
 use rand::RngExt;
 

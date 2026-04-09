@@ -37,12 +37,12 @@ fn host_dealloc(ptr: *mut u8, layout: Layout) {
     unsafe { dealloc(ptr, layout) };
 }
 
-fn init_allocator(
-    allocator: &GlobalAllocator<PAGE_SIZE>,
-    region_addr: usize,
-    region_size: usize,
-) {
-    unsafe { allocator.init(region_addr, region_size, 1, &MOCK_OS).unwrap() };
+fn init_allocator(allocator: &GlobalAllocator<PAGE_SIZE>, region_addr: usize, region_size: usize) {
+    unsafe {
+        allocator
+            .init(region_addr, region_size, 1, &MOCK_OS)
+            .unwrap()
+    };
 }
 
 #[test]
@@ -74,10 +74,7 @@ fn test_lowmem_aligned() {
     init_allocator(&allocator, region_ptr as usize, TEST_HEAP_SIZE);
 
     let addr = allocator.alloc_pages_lowmem(1, 2 * PAGE_SIZE).unwrap();
-    assert_eq!(
-        (addr - allocator.managed_heap_start()) % (2 * PAGE_SIZE),
-        0
-    );
+    assert_eq!((addr - allocator.managed_heap_start()) % (2 * PAGE_SIZE), 0);
     allocator.dealloc_pages(addr, 1);
 
     host_dealloc(region_ptr, region_layout);
