@@ -256,7 +256,7 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
                 region_size,
                 REGION_GRANULE,
             ) else {
-                log::debug!(
+                log::info!(
                     "GlobalAllocator: skip region {:#x}+{:#x}, no allocator-visible memory after {} alignment",
                     region_start,
                     region_size,
