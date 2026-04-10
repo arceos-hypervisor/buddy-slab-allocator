@@ -96,6 +96,6 @@ fn global_add_region_unaligned_lowmem_alignment() {
 
     let addr = allocator.alloc_pages_lowmem(1, ALIGN_2M).unwrap();
     assert_eq!(addr % ALIGN_2M, 0);
-    assert!(virt_to_phys(addr) + PAGE_SIZE <= 0x1_0000_000);
+    assert!(virt_to_phys(addr) + PAGE_SIZE <= 0x1000_0000);
     allocator.dealloc_pages(addr, 1);
 }

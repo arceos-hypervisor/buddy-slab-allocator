@@ -39,6 +39,20 @@ pub mod eii {
     pub fn slab_pool() -> &'static dyn crate::SlabPoolTrait;
 }
 
+// ---------------------------------------------------------------------------
+// Utility helpers (crate-internal)
+// ---------------------------------------------------------------------------
+
+#[inline]
+pub(crate) const fn align_up(pos: usize, align: usize) -> usize {
+    (pos + align - 1) & !(align - 1)
+}
+
+#[inline]
+pub(crate) const fn is_aligned(addr: usize, align: usize) -> bool {
+    addr & (align - 1) == 0
+}
+
 #[cfg(test)]
 mod test_eii_impls {
     use core::{alloc::Layout, ptr::NonNull};
@@ -92,18 +106,4 @@ mod test_eii_impls {
     fn test_slab_pool() -> &'static dyn SlabPoolTrait {
         &NULL_SLAB_POOL
     }
-}
-
-// ---------------------------------------------------------------------------
-// Utility helpers (crate-internal)
-// ---------------------------------------------------------------------------
-
-#[inline]
-pub(crate) const fn align_up(pos: usize, align: usize) -> usize {
-    (pos + align - 1) & !(align - 1)
-}
-
-#[inline]
-pub(crate) const fn is_aligned(addr: usize, align: usize) -> bool {
-    addr & (align - 1) == 0
 }

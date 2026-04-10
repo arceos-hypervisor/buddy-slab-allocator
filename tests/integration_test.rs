@@ -40,7 +40,7 @@ fn init_buddy_with_heap_alignment(
         let slice = unsafe { region.subslice(offset, region.len() - offset) };
         if unsafe { buddy.init(slice) }.is_ok() {
             let section = buddy.section(0).unwrap();
-            if section.start % heap_align == 0 {
+            if section.start.is_multiple_of(heap_align) {
                 return section;
             }
         }
