@@ -164,6 +164,27 @@ fn buddy_aligned_alloc_dealloc_uses_recorded_order() {
 }
 
 #[test]
+fn buddy_aligned_alloc_dealloc_reuses_capacity_across_cycles() {
+    let heap_size = 64 * PAGE_SIZE;
+    let mut region = HostRegion::new(
+        buddy_region_size(heap_size) + PAGE_SIZE * 16,
+        PAGE_SIZE * 16,
+    );
+    let mut buddy = BuddyAllocator::<PAGE_SIZE>::new();
+    let _section = init_buddy_with_heap_alignment(&mut buddy, &mut region, PAGE_SIZE * 16);
+
+    let free_before = buddy.free_pages();
+    for iter in 0..(heap_size / (4 * PAGE_SIZE) * 8) {
+        let addr = buddy
+            .alloc_pages(4, PAGE_SIZE * 2)
+            .unwrap_or_else(|err| panic!("iteration {iter} unexpectedly failed: {err:?}"));
+        assert_eq!(addr % (PAGE_SIZE * 2), 0);
+        buddy.dealloc_pages(addr, 4);
+        assert_eq!(buddy.free_pages(), free_before);
+    }
+}
+
+#[test]
 fn buddy_exhaust_and_recover() {
     let heap_size = 64 * PAGE_SIZE; // Small heap
     let mut region = HostRegion::new(buddy_region_size(heap_size), PAGE_SIZE);

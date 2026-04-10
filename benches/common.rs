@@ -18,6 +18,7 @@ pub const OPERATIONS_PER_BATCH: usize = 256;
 pub const FRAGMENTATION_PAGES: usize = 512;
 
 const REGION_ALIGN: usize = 64 * 1024;
+const BENCH_HEAP_ALIGN: usize = REGION_ALIGN;
 const BENCH_PAGE_SIZE: usize = 0x1000;
 const MAX_BENCH_CPUS: usize = 64;
 
@@ -40,6 +41,14 @@ impl HostRegion {
 
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
         unsafe { core::slice::from_raw_parts_mut(self.ptr, self.layout.size()) }
+    }
+
+    pub fn len(&self) -> usize {
+        self.layout.size()
+    }
+
+    pub unsafe fn subslice(&mut self, offset: usize, len: usize) -> &mut [u8] {
+        unsafe { core::slice::from_raw_parts_mut(self.ptr.add(offset), len) }
     }
 }
 
@@ -148,9 +157,7 @@ impl BuddyHarness {
             heap_size + BuddyAllocator::<PAGE_SIZE>::required_meta_size(heap_size) + PAGE_SIZE * 4;
         let mut region = HostRegion::new(region_size);
         let mut allocator = BuddyAllocator::<PAGE_SIZE>::new();
-        unsafe {
-            allocator.init(region.as_mut_slice()).unwrap();
-        }
+        init_buddy_with_heap_alignment(&mut allocator, &mut region, BENCH_HEAP_ALIGN);
         Self {
             _region: region,
             allocator,
@@ -170,9 +177,7 @@ impl SlabHarness {
             heap_size + BuddyAllocator::<PAGE_SIZE>::required_meta_size(heap_size) + PAGE_SIZE * 4;
         let mut region = HostRegion::new(region_size);
         let mut buddy = BuddyAllocator::<PAGE_SIZE>::new();
-        unsafe {
-            buddy.init(region.as_mut_slice()).unwrap();
-        }
+        init_buddy_with_heap_alignment(&mut buddy, &mut region, BENCH_HEAP_ALIGN);
         Self {
             _region: region,
             buddy,
@@ -201,6 +206,28 @@ impl SlabHarness {
             }
         }
     }
+}
+
+fn init_buddy_with_heap_alignment(
+    buddy: &mut BuddyAllocator<PAGE_SIZE>,
+    region: &mut HostRegion,
+    heap_align: usize,
+) {
+    for offset in (0..heap_align).step_by(PAGE_SIZE) {
+        if region.len() <= offset {
+            break;
+        }
+        let slice = unsafe { region.subslice(offset, region.len() - offset) };
+        if unsafe { buddy.init(slice) }.is_ok()
+            && buddy
+                .section(0)
+                .is_some_and(|section| section.start.is_multiple_of(heap_align))
+        {
+            return;
+        }
+    }
+
+    panic!("failed to initialize bench buddy heap with alignment {heap_align:#x}");
 }
 
 pub struct GlobalHarness {
