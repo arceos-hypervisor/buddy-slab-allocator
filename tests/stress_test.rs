@@ -4,8 +4,7 @@ mod common;
 
 use buddy_slab_allocator::{GlobalAllocator, SizeClass};
 use common::{
-    HostRegion, TEST_OS, count_free_pages, init_global, nonnull_from_addr, seeded_rng,
-    set_current_cpu,
+    HostRegion, count_free_pages, init_global, nonnull_from_addr, seeded_rng, set_current_cpu,
 };
 use rand::RngExt;
 use std::alloc::Layout;
@@ -40,7 +39,7 @@ fn assert_recovered_with_cached_slabs(
 fn stress_random_mixed_alloc_free() {
     let mut region = HostRegion::new(HEAP_SIZE, PAGE_SIZE);
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    init_global(&allocator, &mut region, 2, &TEST_OS);
+    let _ctx = init_global(&allocator, &mut region, 2);
     let mut rng = seeded_rng(0);
     let mut allocated: Vec<(usize, Layout)> = Vec::new();
 
@@ -75,7 +74,7 @@ fn stress_random_mixed_alloc_free() {
 fn stress_exhaustion_recovery() {
     let mut region = HostRegion::new(HEAP_SIZE, PAGE_SIZE);
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    init_global(&allocator, &mut region, 1, &TEST_OS);
+    let _ctx = init_global(&allocator, &mut region, 1);
     let layout = Layout::from_size_align(PAGE_SIZE, PAGE_SIZE).unwrap();
     let mut allocated = Vec::new();
 
@@ -104,7 +103,7 @@ fn stress_exhaustion_recovery() {
 fn stress_fragmentation_recovery() {
     let mut region = HostRegion::new(HEAP_SIZE, PAGE_SIZE);
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    init_global(&allocator, &mut region, 2, &TEST_OS);
+    let _ctx = init_global(&allocator, &mut region, 2);
     let small_layout = Layout::from_size_align(64, 8).unwrap();
     let mut small_ptrs = Vec::new();
 
@@ -136,7 +135,7 @@ fn stress_fragmentation_recovery() {
 fn stress_multithread_mixed_alloc_free() {
     let mut region = HostRegion::new(HEAP_SIZE, PAGE_SIZE);
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    init_global(&allocator, &mut region, WORKERS, &TEST_OS);
+    let _ctx = init_global(&allocator, &mut region, WORKERS);
     let baseline = count_free_pages(&allocator);
     let allocator = &allocator;
     let barrier = Barrier::new(WORKERS);
@@ -186,7 +185,7 @@ fn stress_multithread_mixed_alloc_free() {
 fn stress_multithread_remote_free() {
     let mut region = HostRegion::new(HEAP_SIZE, PAGE_SIZE);
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    init_global(&allocator, &mut region, WORKERS, &TEST_OS);
+    let _ctx = init_global(&allocator, &mut region, WORKERS);
     let baseline = count_free_pages(&allocator);
     let allocator = &allocator;
     let barrier = Barrier::new(WORKERS);
@@ -239,7 +238,7 @@ fn stress_multithread_remote_free() {
 fn stress_multithread_page_alloc_free() {
     let mut region = HostRegion::new(HEAP_SIZE, PAGE_SIZE);
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    init_global(&allocator, &mut region, WORKERS, &TEST_OS);
+    let _ctx = init_global(&allocator, &mut region, WORKERS);
     let baseline = count_free_pages(&allocator);
     let allocator = &allocator;
     let barrier = Barrier::new(WORKERS);
@@ -287,7 +286,7 @@ fn stress_multithread_fragmentation_recovery() {
 
     let mut region = HostRegion::new(REGION_SIZE, PAGE_SIZE * 4);
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    init_global(&allocator, &mut region, WORKERS, &TEST_OS);
+    let _ctx = init_global(&allocator, &mut region, WORKERS);
     let baseline = count_free_pages(&allocator);
     let allocator = &allocator;
     let barrier = Barrier::new(WORKERS);
@@ -365,7 +364,7 @@ fn stress_multithread_exhaustion_recovery() {
 
     let mut region = HostRegion::new(REGION_SIZE, PAGE_SIZE * 4);
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    init_global(&allocator, &mut region, WORKERS, &TEST_OS);
+    let _ctx = init_global(&allocator, &mut region, WORKERS);
     let baseline = count_free_pages(&allocator);
     let allocator = &allocator;
     let barrier = Barrier::new(WORKERS);
@@ -429,7 +428,7 @@ fn stress_add_region_then_multithread_alloc_free() {
     let mut second = HostRegion::new(4 * 1024 * 1024, PAGE_SIZE * 4);
     let mut third = HostRegion::new(4 * 1024 * 1024, PAGE_SIZE * 4);
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
-    init_global(&allocator, &mut first, WORKERS, &TEST_OS);
+    let _ctx = init_global(&allocator, &mut first, WORKERS);
     unsafe {
         allocator.add_region(second.as_mut_slice()).unwrap();
         allocator.add_region(third.as_mut_slice()).unwrap();

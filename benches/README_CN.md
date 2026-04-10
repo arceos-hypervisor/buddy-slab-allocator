@@ -14,7 +14,7 @@
 - region / metadata 分配
 - buddy / slab / global 初始化
 - 固定随机种子
-- mock `OsImpl`
+- mock EII 接口
 
 ## 运行方式
 

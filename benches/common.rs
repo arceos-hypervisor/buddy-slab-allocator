@@ -1,12 +1,15 @@
 #![allow(dead_code)]
 
+use buddy_slab_allocator::eii::{current_cpu_slab_impl, remote_slab_impl, virt_to_phys_impl};
 use buddy_slab_allocator::{
-    BuddyAllocator, GlobalAllocator, OsImpl, SlabAllocResult, SlabAllocator, SlabDeallocResult,
+    BuddyAllocator, GlobalAllocator, PerCpuSlab, SlabAllocResult, SlabAllocator, SlabDeallocResult,
+    SlabTrait,
 };
 use core::alloc::Layout;
 use rand::{SeedableRng, rngs::StdRng};
 use std::alloc::{alloc, dealloc};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 pub const PAGE_SIZE: usize = 0x1000;
 pub const HEAP_SIZE: usize = 64 * 1024 * 1024;
@@ -14,6 +17,8 @@ pub const OPERATIONS_PER_BATCH: usize = 256;
 pub const FRAGMENTATION_PAGES: usize = 512;
 
 const REGION_ALIGN: usize = 64 * 1024;
+const BENCH_PAGE_SIZE: usize = 0x1000;
+const MAX_BENCH_CPUS: usize = 64;
 
 pub struct HostRegion {
     ptr: *mut u8,
@@ -59,17 +64,51 @@ impl MockOs {
     }
 }
 
-impl OsImpl for MockOs {
-    fn current_cpu_idx(&self) -> usize {
-        self.cpu.load(Ordering::Relaxed)
-    }
-
-    fn virt_to_phys(&self, vaddr: usize) -> usize {
-        vaddr
-    }
+pub struct BenchContext {
+    _guard: MutexGuard<'static, ()>,
 }
 
 pub static MOCK_OS: MockOs = MockOs::new();
+
+fn bench_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn bench_cpu_slabs() -> &'static [PerCpuSlab<BENCH_PAGE_SIZE>] {
+    static SLABS: OnceLock<Box<[PerCpuSlab<BENCH_PAGE_SIZE>]>> = OnceLock::new();
+    SLABS.get_or_init(|| {
+        (0..MAX_BENCH_CPUS)
+            .map(|cpu| PerCpuSlab::new(cpu as u16))
+            .collect::<Vec<_>>()
+            .into_boxed_slice()
+    })
+}
+
+fn reset_cpu_slabs(cpu_count: usize) {
+    assert!(
+        cpu_count <= MAX_BENCH_CPUS,
+        "cpu_count exceeds bench slab pool"
+    );
+    for slab in &bench_cpu_slabs()[..cpu_count] {
+        slab.reset();
+    }
+}
+
+#[virt_to_phys_impl]
+fn bench_virt_to_phys(vaddr: usize) -> usize {
+    vaddr
+}
+
+#[current_cpu_slab_impl]
+fn bench_current_cpu_slab() -> &'static dyn SlabTrait {
+    &bench_cpu_slabs()[MOCK_OS.cpu.load(Ordering::Relaxed)]
+}
+
+#[remote_slab_impl]
+fn bench_remote_slab(cpu_idx: usize) -> &'static dyn SlabTrait {
+    &bench_cpu_slabs()[cpu_idx]
+}
 
 pub fn seeded_rng() -> StdRng {
     StdRng::from_seed([0; 32])
@@ -87,7 +126,7 @@ impl BuddyHarness {
         let mut region = HostRegion::new(region_size);
         let mut allocator = BuddyAllocator::<PAGE_SIZE>::new();
         unsafe {
-            allocator.init(region.as_mut_slice(), None).unwrap();
+            allocator.init(region.as_mut_slice()).unwrap();
         }
         Self {
             _region: region,
@@ -109,7 +148,7 @@ impl SlabHarness {
         let mut region = HostRegion::new(region_size);
         let mut buddy = BuddyAllocator::<PAGE_SIZE>::new();
         unsafe {
-            buddy.init(region.as_mut_slice(), None).unwrap();
+            buddy.init(region.as_mut_slice()).unwrap();
         }
         Self {
             _region: region,
@@ -143,21 +182,27 @@ impl SlabHarness {
 
 pub struct GlobalHarness {
     _region: HostRegion,
+    _ctx: BenchContext,
     pub allocator: GlobalAllocator<PAGE_SIZE>,
 }
 
 impl GlobalHarness {
     pub fn new(region_size: usize, cpu_count: usize) -> Self {
+        assert_eq!(
+            PAGE_SIZE, BENCH_PAGE_SIZE,
+            "bench EII slab pool only supports PAGE_SIZE={BENCH_PAGE_SIZE:#x}"
+        );
         let mut region = HostRegion::new(region_size);
         let allocator = GlobalAllocator::<PAGE_SIZE>::new();
+        let guard = bench_lock().lock().unwrap();
         MOCK_OS.set_cpu(0);
+        reset_cpu_slabs(cpu_count);
         unsafe {
-            allocator
-                .init(region.as_mut_slice(), cpu_count, &MOCK_OS)
-                .unwrap();
+            allocator.init(region.as_mut_slice()).unwrap();
         }
         Self {
             _region: region,
+            _ctx: BenchContext { _guard: guard },
             allocator,
         }
     }

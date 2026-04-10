@@ -19,34 +19,34 @@ The design details are documented in [docs/design.md](docs/design.md).
 
 ```mermaid
 flowchart TD
-    GA[GlobalAllocator] --> B[SpinMutex<BuddyAllocator>]
-    GA --> OS[OsImpl]
-    GA --> PCS[per_cpu_slabs: *mut SpinMutex<SlabAllocator>[]]
+    GA["GlobalAllocator"] --> B["SpinMutex<BuddyAllocator>"]
+    GA --> EI["eii hooks"]
+    EI --> PCS["current_cpu_slab / remote_slab"]
 
-    B --> PM[PageMeta[]]
-    B --> FL[free_lists by order]
+    B --> PM["PageMeta[]"]
+    B --> FL["free_lists by order"]
 
-    PCS --> SA[SlabAllocator]
-    SA --> SC[SlabCache x 9]
-    SC --> P[partial]
-    SC --> F[full]
-    SC --> E[empty]
-    SC --> H[SlabPageHeader]
+    PCS --> SA["SlabAllocator"]
+    SA --> SC["SlabCache x 9"]
+    SC --> P["partial"]
+    SC --> F["full"]
+    SC --> E["empty"]
+    SC --> H["SlabPageHeader"]
 ```
 
 ### Allocation routing
 
 ```mermaid
 flowchart TD
-    A[GlobalAllocator::alloc(layout)] --> B{size <= 2048 and align <= 2048?}
-    B -- Yes --> C[Use current CPU slab allocator]
-    C --> D{Allocated from slab?}
-    D -- Yes --> E[Return object pointer]
-    D -- No --> F[Allocate pages from buddy as a new slab]
-    F --> G[add_slab and retry]
+    A["GlobalAllocator::alloc(layout)"] --> B{"size <= 2048 and align <= 2048?"}
+    B -- Yes --> C["Use current CPU slab allocator"]
+    C --> D{"Allocated from slab?"}
+    D -- Yes --> E["Return object pointer"]
+    D -- No --> F["Allocate pages from buddy as a new slab"]
+    F --> G["add_slab and retry"]
     G --> E
-    B -- No --> H[Allocate pages directly from buddy]
-    H --> I[Return page-backed pointer]
+    B -- No --> H["Allocate pages directly from buddy"]
+    H --> I["Return page-backed pointer"]
 ```
 
 ### Cross-CPU free path
@@ -89,19 +89,32 @@ buddy-slab-allocator = "0.2.0"
 ## Using `GlobalAllocator`
 
 ```rust
-use buddy_slab_allocator::{GlobalAllocator, OsImpl};
+#![feature(extern_item_impls)]
+
+use buddy_slab_allocator::eii::{
+    current_cpu_slab_impl, remote_slab_impl, virt_to_phys_impl,
+};
+use buddy_slab_allocator::{GlobalAllocator, PerCpuSlab, SlabTrait};
 use core::alloc::Layout;
 
 const PAGE_SIZE: usize = 0x1000;
 
-struct DemoOs;
+static CPU_SLABS: [PerCpuSlab<PAGE_SIZE>; 1] = [PerCpuSlab::new(0)];
 
-impl OsImpl for DemoOs {
-    fn current_cpu_idx(&self) -> usize { 0 }
-    fn virt_to_phys(&self, vaddr: usize) -> usize { vaddr }
+#[virt_to_phys_impl]
+fn virt_to_phys(vaddr: usize) -> usize {
+    vaddr
 }
 
-static OS: DemoOs = DemoOs;
+#[current_cpu_slab_impl]
+fn current_cpu_slab() -> &'static dyn SlabTrait {
+    &CPU_SLABS[0]
+}
+
+#[remote_slab_impl]
+fn remote_slab(_cpu_idx: usize) -> &'static dyn SlabTrait {
+    &CPU_SLABS[0]
+}
 
 let allocator = GlobalAllocator::<PAGE_SIZE>::new();
 let region_start = 0x8000_0000 as *mut u8;
@@ -109,7 +122,7 @@ let region_size = 16 * 1024 * 1024;
 let region = unsafe { core::slice::from_raw_parts_mut(region_start, region_size) };
 
 unsafe {
-    allocator.init(region, 1, &OS).unwrap();
+    allocator.init(region).unwrap();
 }
 
 let layout = Layout::from_size_align(64, 8).unwrap();
@@ -148,7 +161,7 @@ let region = unsafe { core::slice::from_raw_parts_mut(region_start, region_size)
 
 let mut buddy = BuddyAllocator::<PAGE_SIZE>::new();
 unsafe {
-    buddy.init(region, None).unwrap();
+    buddy.init(region).unwrap();
 }
 
 let mut slab = SlabAllocator::<PAGE_SIZE>::new();
@@ -199,8 +212,8 @@ unsafe {
   `Allocated(ptr)` or `NeedsSlab { size_class, pages }`.
 - `SlabDeallocResult`
   `Done` or `FreeSlab { base, pages }`.
-- `OsImpl`
-  Provides `current_cpu_idx()` and `virt_to_phys()` for per-CPU routing and lowmem selection.
+- `eii`
+  Declares `current_cpu_slab()`, `remote_slab()`, and `virt_to_phys()` for platform integration.
 
 `managed_bytes` counts only allocatable heap bytes and excludes region-prefix metadata.
 `allocated_bytes` is backend page occupancy, not the exact sum of requested `layout.size()`.

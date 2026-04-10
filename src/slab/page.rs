@@ -16,6 +16,9 @@ pub const MAX_OBJECTS_PER_SLAB: usize = 512;
 /// Number of u64 words in the local bitmap.
 pub const BITMAP_WORDS: usize = MAX_OBJECTS_PER_SLAB / 64; // 8
 
+/// Maximum number of pages a slab may span.
+pub const MAX_SLAB_PAGES: usize = 4;
+
 /// Header placed at the very start of each slab page.
 ///
 /// Object data starts at `header_end`, aligned to `size_class.size()`.
@@ -141,6 +144,33 @@ impl SlabPageHeader {
 
         debug_assert!(false, "object address does not belong to a live slab");
         page_base
+    }
+
+    /// Base address (slab start) from an object address without knowing the slab size.
+    ///
+    /// Searches backward up to [`MAX_SLAB_PAGES`] pages and validates each candidate
+    /// against the header's `slab_bytes`.
+    #[inline]
+    pub fn base_from_obj_addr_unknown<const PAGE_SIZE: usize>(addr: usize) -> Option<usize> {
+        let page_base = addr & !(PAGE_SIZE - 1);
+        for page_idx in 0..MAX_SLAB_PAGES {
+            let Some(candidate) = page_base.checked_sub(page_idx * PAGE_SIZE) else {
+                break;
+            };
+            let hdr = unsafe { &*(candidate as *const SlabPageHeader) };
+            let slab_bytes = hdr.slab_bytes as usize;
+            if hdr.magic != SLAB_MAGIC
+                || slab_bytes == 0
+                || !slab_bytes.is_multiple_of(PAGE_SIZE)
+                || slab_bytes / PAGE_SIZE > MAX_SLAB_PAGES
+            {
+                continue;
+            }
+            if addr >= candidate && addr < candidate + slab_bytes {
+                return Some(candidate);
+            }
+        }
+        None
     }
 
     // ------------------------------------------------------------------

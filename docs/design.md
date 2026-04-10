@@ -30,21 +30,21 @@
 
 ```mermaid
 flowchart TD
-    GA[GlobalAllocator] --> B[BuddyAllocator]
-    GA --> PCS[per-CPU SlabAllocator[]]
-    GA --> OS[OsImpl]
+    GA["GlobalAllocator"] --> B["BuddyAllocator"]
+    GA --> PCS["per-CPU SlabAllocator array"]
+    GA --> OS["OsImpl"]
 
-    PCS --> SC8[SlabCache: 8B]
-    PCS --> SC64[SlabCache: 64B]
-    PCS --> SC2K[SlabCache: 2048B]
+    PCS --> SC8["SlabCache: 8B"]
+    PCS --> SC64["SlabCache: 64B"]
+    PCS --> SC2K["SlabCache: 2048B"]
 
-    SC8 --> SPH[SlabPageHeader]
+    SC8 --> SPH["SlabPageHeader"]
     SC64 --> SPH
     SC2K --> SPH
 
-    B --> SH[BuddySection intrusive list]
-    SH --> PM[PageMeta[]]
-    SH --> FL[free_lists by order]
+    B --> SH["BuddySection intrusive list"]
+    SH --> PM["PageMeta[]"]
+    SH --> FL["free_lists by order"]
 ```
 
 ### 2.1 地址语义
@@ -104,16 +104,16 @@ flowchart TD
 
 ```mermaid
 flowchart LR
-    A[region start] --> B[aligned section_start]
-    B --> C[BuddySection]
-    C --> D[PageMeta array]
-    D --> E{first global region?}
-    E -- Yes --> F[per-CPU SlabAllocator slots]
-    E -- No --> G[no slab slots here]
-    F --> H[padding to PAGE_SIZE]
+    A["region start"] --> B["aligned section_start"]
+    B --> C["BuddySection"]
+    C --> D["PageMeta array"]
+    D --> E{"first global region?"}
+    E -- Yes --> F["per-CPU SlabAllocator slots"]
+    E -- No --> G["no slab slots here"]
+    F --> H["padding to PAGE_SIZE"]
     G --> H
-    H --> I[section heap start]
-    I --> J[managed heap of this section]
+    H --> I["section heap start"]
+    I --> J["managed heap of this section"]
 ```
 
 ### 3.1 初始化步骤
@@ -158,19 +158,19 @@ flowchart LR
 ```mermaid
 classDiagram
     class BuddyAllocator {
-        +sections_head: *mut BuddySection
-        +section_count: usize
-        +os: Option<&dyn OsImpl>
+        +sections_head_ptr
+        +section_count
+        +os_hook
     }
 
     class BuddySection {
-        +next: *mut BuddySection
-        +meta: *mut PageMeta
-        +heap_start: usize
-        +heap_size: usize
-        +free_lists: [u32; MAX_ORDER+1]
-        +free_pages: usize
-        +total_pages: usize
+        +next_ptr
+        +meta_ptr
+        +heap_start
+        +heap_size
+        +free_lists_by_order
+        +free_pages
+        +total_pages
     }
 
     class PageFlags {
@@ -204,20 +204,20 @@ classDiagram
 
 ```mermaid
 flowchart TD
-    A[alloc_pages(count, align)] --> B[计算 order]
-    B --> C[计算 align_order]
-    C --> D[effective_order = max(order, align_order)]
-    D --> E[按注册顺序扫描 section]
-    E --> F[在 section 内从 effective_order 向上找非空 free list]
+    A["alloc_pages(count, align)"] --> B["计算 order"]
+    B --> C["计算 align_order"]
+    C --> D["effective_order = max(order, align_order)"]
+    D --> E["按注册顺序扫描 section"]
+    E --> F["在 section 内从 effective_order 向上找非空 free list"]
     F --> G{找到块?}
-    G -- 否 --> H[尝试下一个 section]
+    G -- 否 --> H["尝试下一个 section"]
     H --> I{还有 section?}
-    I -- 否 --> J[返回 NoMemory]
+    I -- 否 --> J["返回 NoMemory"]
     I -- 是 --> F
-    G -- 是 --> K[弹出大块]
-    K --> L[逐级 split 到目标 order]
-    L --> M[标记头页为 Allocated]
-    M --> N[返回虚拟地址]
+    G -- 是 --> K["弹出大块"]
+    K --> L["逐级 split 到目标 order"]
+    L --> M["标记头页为 Allocated"]
+    M --> N["返回虚拟地址"]
 ```
 
 注意点：
@@ -250,14 +250,14 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A[dealloc_pages(addr, count)] --> B[根据 addr 算出 pfn]
-    B --> C[读取 PageMeta.order]
-    C --> D[与 buddy pfn 检查是否可合并]
+    A["dealloc_pages(addr, count)"] --> B["根据 addr 算出 pfn"]
+    B --> C["读取 PageMeta.order"]
+    C --> D["与 buddy pfn 检查是否可合并"]
     D --> E{buddy 同 order 且空闲?}
-    E -- 是 --> F[从 free list 移除 buddy]
-    F --> G[合并并提升 order]
+    E -- 是 --> F["从 free list 移除 buddy"]
+    F --> G["合并并提升 order"]
     G --> D
-    E -- 否 --> H[将最终块挂回 free list]
+    E -- 否 --> H["将最终块挂回 free list"]
 ```
 
 ## 5. SlabAllocator 设计
@@ -355,11 +355,11 @@ owner CPU 在持有对应 slab 锁时执行本地分配：
 
 ```mermaid
 flowchart TD
-    A[alloc(layout)] --> B{已初始化?}
-    B -- 否 --> X[NotInitialized]
+    A["alloc(layout)"] --> B{"已初始化?"}
+    B -- 否 --> X["NotInitialized"]
     B -- 是 --> C{slab eligible?}
-    C -- 是 --> D[slab_alloc]
-    C -- 否 --> E[large_alloc]
+    C -- 是 --> D["slab_alloc"]
+    C -- 否 --> E["large_alloc"]
 ```
 
 ### 6.2 小对象分配

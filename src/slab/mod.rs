@@ -16,6 +16,7 @@ pub use size_class::SizeClass;
 use cache::{CacheDeallocResult, SlabCache};
 use core::alloc::Layout;
 use core::ptr::NonNull;
+use spin::Mutex as SpinMutex;
 
 use crate::error::{AllocError, AllocResult};
 
@@ -37,9 +38,48 @@ pub enum SlabDeallocResult {
     FreeSlab { base: usize, pages: usize },
 }
 
+/// Object-safe slab interface used by [`crate::GlobalAllocator`] EII hooks.
+pub trait SlabTrait: Sync {
+    /// Logical CPU id this slab belongs to.
+    fn cpu_id(&self) -> usize;
+
+    /// Allocate one object.
+    fn alloc(&self, layout: Layout) -> AllocResult<SlabAllocResult>;
+
+    /// Register a freshly allocated slab page.
+    fn add_slab(&self, size_class: SizeClass, base: usize, bytes: usize);
+
+    /// Free an object on the owner CPU path.
+    fn dealloc_local(&self, ptr: NonNull<u8>, layout: Layout) -> SlabDeallocResult;
+
+    /// Free an object on the remote CPU path.
+    fn dealloc_remote(&self, ptr: NonNull<u8>);
+}
+
 /// Standalone slab allocator (one per CPU or standalone use).
 pub struct SlabAllocator<const PAGE_SIZE: usize = 0x1000> {
     caches: [SlabCache; SizeClass::COUNT],
+}
+
+/// Default per-CPU slab wrapper used by EII integrators.
+pub struct PerCpuSlab<const PAGE_SIZE: usize = 0x1000> {
+    cpu_id: u16,
+    inner: SpinMutex<SlabAllocator<PAGE_SIZE>>,
+}
+
+impl<const PAGE_SIZE: usize> PerCpuSlab<PAGE_SIZE> {
+    /// Create an empty per-CPU slab wrapper for `cpu_id`.
+    pub const fn new(cpu_id: u16) -> Self {
+        Self {
+            cpu_id,
+            inner: SpinMutex::new(SlabAllocator::new()),
+        }
+    }
+
+    /// Reset the inner slab allocator to an empty state.
+    pub fn reset(&self) {
+        *self.inner.lock() = SlabAllocator::new();
+    }
 }
 
 impl<const PAGE_SIZE: usize> SlabAllocator<PAGE_SIZE> {
@@ -110,5 +150,37 @@ impl<const PAGE_SIZE: usize> SlabAllocator<PAGE_SIZE> {
     /// `base` is the virtual address of the page(s), `bytes` = pages × PAGE_SIZE.
     pub fn add_slab(&mut self, size_class: SizeClass, base: usize, bytes: usize, owner_cpu: u16) {
         self.caches[size_class.index()].add_slab(base, bytes, owner_cpu);
+    }
+}
+
+impl<const PAGE_SIZE: usize> SlabTrait for PerCpuSlab<PAGE_SIZE> {
+    fn cpu_id(&self) -> usize {
+        self.cpu_id as usize
+    }
+
+    fn alloc(&self, layout: Layout) -> AllocResult<SlabAllocResult> {
+        self.inner.lock().alloc(layout)
+    }
+
+    fn add_slab(&self, size_class: SizeClass, base: usize, bytes: usize) {
+        self.inner
+            .lock()
+            .add_slab(size_class, base, bytes, self.cpu_id);
+    }
+
+    fn dealloc_local(&self, ptr: NonNull<u8>, layout: Layout) -> SlabDeallocResult {
+        self.inner.lock().dealloc(ptr, layout)
+    }
+
+    fn dealloc_remote(&self, ptr: NonNull<u8>) {
+        let obj_addr = ptr.as_ptr() as usize;
+        let Some(base) = SlabPageHeader::base_from_obj_addr_unknown::<PAGE_SIZE>(obj_addr) else {
+            debug_assert!(false, "object address does not belong to a live slab");
+            return;
+        };
+        let hdr = unsafe { &*(base as *const SlabPageHeader) };
+        debug_assert_eq!(hdr.magic, page::SLAB_MAGIC);
+        debug_assert_eq!(hdr.owner_cpu, self.cpu_id);
+        unsafe { hdr.remote_free(obj_addr) };
     }
 }

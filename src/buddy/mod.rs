@@ -12,7 +12,7 @@ pub use page_meta::{PFN_NONE, PageFlags, PageMeta};
 use core::ptr;
 
 use crate::error::{AllocError, AllocResult};
-use crate::{OsImpl, align_up, is_aligned};
+use crate::{align_up, eii, is_aligned};
 use page_meta::{free_list_push, free_list_remove};
 
 /// Maximum buddy order. With 4 KiB pages this gives 2^20 × 4 KiB = 4 GiB blocks.
@@ -288,7 +288,6 @@ pub struct BuddyAllocator<const PAGE_SIZE: usize = 0x1000> {
     sections_head: *mut BuddySection,
     sections_tail: *mut BuddySection,
     section_count: usize,
-    os: Option<&'static dyn OsImpl>,
 }
 
 // SAFETY: The allocator is designed to be wrapped in a SpinMutex.
@@ -308,7 +307,6 @@ impl<const PAGE_SIZE: usize> BuddyAllocator<PAGE_SIZE> {
             sections_head: ptr::null_mut(),
             sections_tail: ptr::null_mut(),
             section_count: 0,
-            os: None,
         }
     }
 }
@@ -320,11 +318,10 @@ impl<const PAGE_SIZE: usize> Default for BuddyAllocator<PAGE_SIZE> {
 }
 
 impl<const PAGE_SIZE: usize> BuddyAllocator<PAGE_SIZE> {
-    pub(crate) fn reset(&mut self, os: Option<&'static dyn OsImpl>) {
+    pub(crate) fn reset(&mut self) {
         self.sections_head = ptr::null_mut();
         self.sections_tail = ptr::null_mut();
         self.section_count = 0;
-        self.os = os;
     }
 
     /// Initialise the allocator over the first section.
@@ -332,13 +329,9 @@ impl<const PAGE_SIZE: usize> BuddyAllocator<PAGE_SIZE> {
     /// # Safety
     /// - `region` must be writable and remain valid for the lifetime of this allocator.
     /// - Bytes consumed by metadata become unavailable for allocation.
-    pub unsafe fn init(
-        &mut self,
-        region: &mut [u8],
-        os: Option<&'static dyn OsImpl>,
-    ) -> AllocResult {
+    pub unsafe fn init(&mut self, region: &mut [u8]) -> AllocResult {
         unsafe {
-            self.reset(os);
+            self.reset();
             self.add_region(region)
         }
     }
@@ -620,8 +613,6 @@ impl<const PAGE_SIZE: usize> BuddyAllocator<PAGE_SIZE> {
 
     /// Allocate pages whose *physical* address is below 4 GiB (DMA32 zone).
     pub fn alloc_pages_lowmem(&mut self, count: usize, align: usize) -> AllocResult<usize> {
-        let os = self.os.ok_or(AllocError::InvalidParam)?;
-
         if count == 0 {
             return Err(AllocError::InvalidParam);
         }
@@ -638,7 +629,7 @@ impl<const PAGE_SIZE: usize> BuddyAllocator<PAGE_SIZE> {
         let mut section = self.sections_head;
         while !section.is_null() {
             if let Ok(addr) =
-                unsafe { Self::alloc_lowmem_from_section(&mut *section, order, align, os) }
+                unsafe { Self::alloc_lowmem_from_section(&mut *section, order, align) }
             {
                 return Ok(addr);
             }
@@ -652,7 +643,6 @@ impl<const PAGE_SIZE: usize> BuddyAllocator<PAGE_SIZE> {
         section: &mut BuddySection,
         alloc_order: usize,
         align: usize,
-        os: &'static dyn OsImpl,
     ) -> AllocResult<usize> {
         for search_order in alloc_order..=MAX_ORDER {
             let mut pfn_u32 = section.free_lists[search_order];
@@ -669,7 +659,7 @@ impl<const PAGE_SIZE: usize> BuddyAllocator<PAGE_SIZE> {
                     continue;
                 };
                 let addr = section.heap_start + target_pfn * PAGE_SIZE;
-                let phys = os.virt_to_phys(addr);
+                let phys = eii::virt_to_phys(addr);
                 let block_bytes = (1usize << alloc_order) * PAGE_SIZE;
                 if phys + block_bytes <= DMA32_LIMIT && addr.is_multiple_of(align) {
                     unsafe {
