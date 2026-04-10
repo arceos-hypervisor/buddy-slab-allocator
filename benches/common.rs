@@ -1,9 +1,10 @@
 #![allow(dead_code)]
 
-use buddy_slab_allocator::eii::{current_cpu_slab_impl, remote_slab_impl, virt_to_phys_impl};
+use buddy_slab_allocator::__reset_global_allocator_singleton_for_tests;
+use buddy_slab_allocator::eii::{slab_pool_impl, virt_to_phys_impl};
 use buddy_slab_allocator::{
     BuddyAllocator, GlobalAllocator, PerCpuSlab, SlabAllocResult, SlabAllocator, SlabDeallocResult,
-    SlabTrait,
+    SlabPoolTrait,
 };
 use core::alloc::Layout;
 use rand::{SeedableRng, rngs::StdRng};
@@ -68,11 +69,21 @@ pub struct BenchContext {
     _guard: MutexGuard<'static, ()>,
 }
 
+struct BenchSlabPool {
+    slabs: &'static [PerCpuSlab<BENCH_PAGE_SIZE>],
+}
+
 pub static MOCK_OS: MockOs = MockOs::new();
 
 fn bench_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
+}
+
+impl Drop for BenchContext {
+    fn drop(&mut self) {
+        __reset_global_allocator_singleton_for_tests();
+    }
 }
 
 fn bench_cpu_slabs() -> &'static [PerCpuSlab<BENCH_PAGE_SIZE>] {
@@ -95,19 +106,31 @@ fn reset_cpu_slabs(cpu_count: usize) {
     }
 }
 
+impl SlabPoolTrait for BenchSlabPool {
+    fn current_slab(&self) -> &dyn buddy_slab_allocator::SlabTrait {
+        &self.slabs[MOCK_OS.cpu.load(Ordering::Relaxed)]
+    }
+
+    fn owner_slab(&self, cpu_idx: usize) -> &dyn buddy_slab_allocator::SlabTrait {
+        &self.slabs[cpu_idx]
+    }
+}
+
+fn bench_slab_pool_ref() -> &'static BenchSlabPool {
+    static POOL: OnceLock<BenchSlabPool> = OnceLock::new();
+    POOL.get_or_init(|| BenchSlabPool {
+        slabs: bench_cpu_slabs(),
+    })
+}
+
 #[virt_to_phys_impl]
 fn bench_virt_to_phys(vaddr: usize) -> usize {
     vaddr
 }
 
-#[current_cpu_slab_impl]
-fn bench_current_cpu_slab() -> &'static dyn SlabTrait {
-    &bench_cpu_slabs()[MOCK_OS.cpu.load(Ordering::Relaxed)]
-}
-
-#[remote_slab_impl]
-fn bench_remote_slab(cpu_idx: usize) -> &'static dyn SlabTrait {
-    &bench_cpu_slabs()[cpu_idx]
+#[slab_pool_impl]
+fn bench_slab_pool() -> &'static dyn SlabPoolTrait {
+    bench_slab_pool_ref()
 }
 
 pub fn seeded_rng() -> StdRng {
@@ -194,7 +217,9 @@ impl GlobalHarness {
         );
         let mut region = HostRegion::new(region_size);
         let allocator = GlobalAllocator::<PAGE_SIZE>::new();
-        let guard = bench_lock().lock().unwrap();
+        let guard = bench_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         MOCK_OS.set_cpu(0);
         reset_cpu_slabs(cpu_count);
         unsafe {

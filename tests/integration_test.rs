@@ -12,8 +12,8 @@ use core::ptr::NonNull;
 use std::collections::BTreeSet;
 
 use common::{
-    GlobalTestContext, HostRegion, count_free_pages, init_global as init_global_allocator,
-    init_global_slice, set_current_cpu,
+    GlobalTestContext, HostRegion, count_free_pages, global_test_context,
+    init_global as init_global_allocator, init_global_slice, set_current_cpu,
 };
 
 const PAGE_SIZE: usize = 0x1000;
@@ -683,6 +683,44 @@ fn init_global(
 }
 
 #[test]
+fn global_reinit_same_instance_rejected() {
+    let allocator = GlobalAllocator::<PAGE_SIZE>::new();
+    let _ctx = global_test_context::<PAGE_SIZE>(1);
+    let mut first = HostRegion::new(TEST_HEAP_SIZE, PAGE_SIZE * 4);
+    let mut second = HostRegion::new(TEST_HEAP_SIZE, PAGE_SIZE * 4);
+
+    unsafe { allocator.init(first.as_mut_slice()).unwrap() };
+    let err = unsafe { allocator.init(second.as_mut_slice()) }.unwrap_err();
+    assert_eq!(err, AllocError::AlreadyInitialized);
+}
+
+#[test]
+fn global_second_live_instance_rejected() {
+    let first_allocator = GlobalAllocator::<PAGE_SIZE>::new();
+    let second_allocator = GlobalAllocator::<PAGE_SIZE>::new();
+    let _ctx = global_test_context::<PAGE_SIZE>(1);
+    let mut first = HostRegion::new(TEST_HEAP_SIZE, PAGE_SIZE * 4);
+    let mut second = HostRegion::new(TEST_HEAP_SIZE, PAGE_SIZE * 4);
+
+    unsafe { first_allocator.init(first.as_mut_slice()).unwrap() };
+    let err = unsafe { second_allocator.init(second.as_mut_slice()) }.unwrap_err();
+    assert_eq!(err, AllocError::AlreadyInitialized);
+}
+
+#[test]
+fn global_failed_init_rolls_back_singleton() {
+    let bad_allocator = GlobalAllocator::<PAGE_SIZE>::new();
+    let good_allocator = GlobalAllocator::<PAGE_SIZE>::new();
+    let _ctx = global_test_context::<PAGE_SIZE>(1);
+    let mut bad = HostRegion::new(PAGE_SIZE - 1, PAGE_SIZE);
+    let mut good = HostRegion::new(TEST_HEAP_SIZE, PAGE_SIZE * 4);
+
+    let err = unsafe { bad_allocator.init(bad.as_mut_slice()) }.unwrap_err();
+    assert_eq!(err, AllocError::InvalidParam);
+    unsafe { good_allocator.init(good.as_mut_slice()).unwrap() };
+}
+
+#[test]
 fn global_page_alloc() {
     let mut region = HostRegion::new(TEST_HEAP_SIZE, PAGE_SIZE * 4);
     let region_addr = region.addr();
@@ -1018,6 +1056,7 @@ fn global_rejects_region_without_one_managed_page() {
     let region_size = PAGE_SIZE - 1;
     let mut region = HostRegion::new(region_size, PAGE_SIZE);
     let allocator = GlobalAllocator::<PAGE_SIZE>::new();
+    let _ctx = global_test_context::<PAGE_SIZE>(1);
 
     let err = unsafe { allocator.init(region.as_mut_slice()) }.unwrap_err();
     assert_eq!(err, AllocError::InvalidParam);

@@ -3,6 +3,7 @@
 /// Each slab page starts with a [`SlabPageHeader`] followed by the object array.
 /// Local (owner-CPU) operations use a bitmap under the slab lock.
 /// Remote (cross-CPU) frees use an atomic CAS stack — no lock required.
+use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use super::size_class::SizeClass;
@@ -146,23 +147,21 @@ impl SlabPageHeader {
         page_base
     }
 
-    /// Base address (slab start) from an object address without knowing the slab size.
-    ///
-    /// Searches backward up to [`MAX_SLAB_PAGES`] pages and validates each candidate
-    /// against the header's `slab_bytes`.
-    #[inline]
-    pub fn base_from_obj_addr_unknown<const PAGE_SIZE: usize>(addr: usize) -> Option<usize> {
-        let page_base = addr & !(PAGE_SIZE - 1);
+    fn base_from_obj_addr_unknown_with_page_size(addr: usize, page_size: usize) -> Option<usize> {
+        if page_size == 0 || !page_size.is_power_of_two() {
+            return None;
+        }
+        let page_base = addr & !(page_size - 1);
         for page_idx in 0..MAX_SLAB_PAGES {
-            let Some(candidate) = page_base.checked_sub(page_idx * PAGE_SIZE) else {
+            let Some(candidate) = page_base.checked_sub(page_idx * page_size) else {
                 break;
             };
             let hdr = unsafe { &*(candidate as *const SlabPageHeader) };
             let slab_bytes = hdr.slab_bytes as usize;
             if hdr.magic != SLAB_MAGIC
                 || slab_bytes == 0
-                || !slab_bytes.is_multiple_of(PAGE_SIZE)
-                || slab_bytes / PAGE_SIZE > MAX_SLAB_PAGES
+                || !slab_bytes.is_multiple_of(page_size)
+                || slab_bytes / page_size > MAX_SLAB_PAGES
             {
                 continue;
             }
@@ -171,6 +170,34 @@ impl SlabPageHeader {
             }
         }
         None
+    }
+
+    /// Base address (slab start) from an object address without knowing the slab size.
+    ///
+    /// Searches backward up to [`MAX_SLAB_PAGES`] pages and validates each candidate
+    /// against the header's `slab_bytes`.
+    #[inline]
+    pub fn base_from_obj_addr_unknown<const PAGE_SIZE: usize>(addr: usize) -> Option<usize> {
+        Self::base_from_obj_addr_unknown_with_page_size(addr, PAGE_SIZE)
+    }
+
+    /// Queue the object on its owner's remote-free list.
+    ///
+    /// # Safety
+    /// - `ptr` must point to a valid live slab object.
+    /// - `owner_cpu` must match the slab header's owner CPU.
+    /// - `page_size` must be the slab allocator's page size.
+    pub unsafe fn remote_free_object(ptr: NonNull<u8>, owner_cpu: u16, page_size: usize) {
+        let obj_addr = ptr.as_ptr() as usize;
+        let Some(base) = Self::base_from_obj_addr_unknown_with_page_size(obj_addr, page_size)
+        else {
+            debug_assert!(false, "object address does not belong to a live slab");
+            return;
+        };
+        let hdr = unsafe { &*(base as *const SlabPageHeader) };
+        debug_assert_eq!(hdr.magic, SLAB_MAGIC);
+        debug_assert_eq!(hdr.owner_cpu, owner_cpu);
+        unsafe { hdr.remote_free(obj_addr) };
     }
 
     // ------------------------------------------------------------------

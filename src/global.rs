@@ -10,12 +10,18 @@ use spin::Mutex as SpinMutex;
 
 use crate::buddy::{BuddyAllocator, BuddySection, ManagedSection, PageFlags, SectionInitSpec};
 use crate::error::{AllocError, AllocResult};
+use crate::slab::SlabAllocResult;
 use crate::slab::page::{SLAB_MAGIC, SlabPageHeader};
 use crate::slab::size_class::{SLAB_MAX_SIZE, SizeClass};
-use crate::slab::{SlabAllocResult, SlabDeallocResult};
 use crate::{align_up, eii};
 
 const REGION_GRANULE: usize = 2 * 1024 * 1024;
+static GLOBAL_ALLOCATOR_LIVE: AtomicBool = AtomicBool::new(false);
+
+#[doc(hidden)]
+pub fn __reset_global_allocator_singleton_for_tests() {
+    GLOBAL_ALLOCATOR_LIVE.store(false, Ordering::Release);
+}
 
 /// Unified allocator: buddy page allocator + per-CPU slab caches.
 pub struct GlobalAllocator<const PAGE_SIZE: usize = 0x1000> {
@@ -51,18 +57,35 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
     /// - Any bytes consumed by metadata or alignment padding become unavailable for allocation.
     pub unsafe fn init(&self, region: &mut [u8]) -> AllocResult {
         unsafe {
+            if self.initialized.load(Ordering::Acquire) {
+                return Err(AllocError::AlreadyInitialized);
+            }
+            if GLOBAL_ALLOCATOR_LIVE
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                return Err(AllocError::AlreadyInitialized);
+            }
+
             let raw_region_start = region.as_mut_ptr() as usize;
             let raw_region_size = region.len();
-            let layout = BuddySection::compute_region_layout_with_heap_align::<PAGE_SIZE>(
+            let layout = match BuddySection::compute_region_layout_with_heap_align::<PAGE_SIZE>(
                 raw_region_start,
                 raw_region_size,
                 REGION_GRANULE,
             )
-            .ok_or(AllocError::InvalidParam)?;
+            .ok_or(AllocError::InvalidParam)
+            {
+                Ok(layout) => layout,
+                Err(err) => {
+                    GLOBAL_ALLOCATOR_LIVE.store(false, Ordering::Release);
+                    return Err(err);
+                }
+            };
 
             let mut buddy = self.buddy.lock();
             buddy.reset();
-            buddy.add_region_raw(SectionInitSpec {
+            if let Err(err) = buddy.add_region_raw(SectionInitSpec {
                 region_start: raw_region_start,
                 region_size: raw_region_size,
                 section_ptr: layout.section_start as *mut BuddySection,
@@ -72,7 +95,10 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
                 ),
                 heap_start: layout.managed_heap_start,
                 heap_size: layout.managed_heap_size,
-            })?;
+            }) {
+                GLOBAL_ALLOCATOR_LIVE.store(false, Ordering::Release);
+                return Err(err);
+            }
             drop(buddy);
 
             self.initialized.store(true, Ordering::Release);
@@ -201,9 +227,9 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
     }
 
     fn slab_alloc(&self, layout: Layout) -> AllocResult<NonNull<u8>> {
-        let slab = eii::current_cpu_slab();
+        let pool = eii::slab_pool();
 
-        match slab.alloc(layout)? {
+        match pool.alloc(layout)? {
             SlabAllocResult::Allocated(ptr) => Ok(ptr),
             SlabAllocResult::NeedsSlab { size_class, pages } => {
                 let bytes = pages * PAGE_SIZE;
@@ -211,8 +237,8 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
                 unsafe {
                     self.buddy.lock().set_page_flags(addr, PageFlags::Slab)?;
                 }
-                slab.add_slab(size_class, addr, bytes);
-                match slab.alloc(layout)? {
+                pool.add_slab(size_class, addr, bytes);
+                match pool.alloc(layout)? {
                     SlabAllocResult::Allocated(ptr) => Ok(ptr),
                     SlabAllocResult::NeedsSlab { .. } => Err(AllocError::NoMemory),
                 }
@@ -229,18 +255,12 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
             let hdr = &*(base as *const SlabPageHeader);
             debug_assert_eq!(hdr.magic, SLAB_MAGIC);
 
-            let owner_cpu = hdr.owner_cpu as usize;
-            let current = eii::current_cpu_slab();
-
-            if owner_cpu == current.cpu_id() {
-                match current.dealloc_local(ptr, layout) {
-                    SlabDeallocResult::Done => {}
-                    SlabDeallocResult::FreeSlab { base, pages } => {
-                        self.buddy.lock().dealloc_pages(base, pages);
-                    }
+            match eii::slab_pool().dealloc(ptr, layout, hdr.owner_cpu as usize) {
+                crate::SlabPoolDeallocResult::Done => {}
+                crate::SlabPoolDeallocResult::RemoteQueued => {}
+                crate::SlabPoolDeallocResult::FreeSlab { base, pages } => {
+                    self.buddy.lock().dealloc_pages(base, pages);
                 }
-            } else {
-                eii::remote_slab(owner_cpu).dealloc_remote(ptr);
             }
         }
     }
@@ -257,6 +277,14 @@ impl<const PAGE_SIZE: usize> GlobalAllocator<PAGE_SIZE> {
         self.buddy
             .lock()
             .dealloc_pages(ptr.as_ptr() as usize, pages);
+    }
+}
+
+impl<const PAGE_SIZE: usize> Drop for GlobalAllocator<PAGE_SIZE> {
+    fn drop(&mut self) {
+        if self.initialized.swap(false, Ordering::AcqRel) {
+            GLOBAL_ALLOCATOR_LIVE.store(false, Ordering::Release);
+        }
     }
 }
 

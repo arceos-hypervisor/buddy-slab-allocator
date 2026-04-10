@@ -19,10 +19,13 @@ pub use buddy::{BuddyAllocator, ManagedSection};
 
 pub mod slab;
 pub use slab::{
-    PerCpuSlab, SizeClass, SlabAllocResult, SlabAllocator, SlabDeallocResult, SlabTrait,
+    PerCpuSlab, SizeClass, SlabAllocResult, SlabAllocator, SlabDeallocResult,
+    SlabPoolDeallocResult, SlabPoolTrait, SlabTrait, StaticSlabPool,
 };
 
 pub mod global;
+#[doc(hidden)]
+pub use global::__reset_global_allocator_singleton_for_tests;
 pub use global::GlobalAllocator;
 
 /// External interface items supplied by the platform / allocator integrator.
@@ -31,29 +34,28 @@ pub mod eii {
     #[eii(virt_to_phys_impl)]
     pub fn virt_to_phys(vaddr: usize) -> usize;
 
-    /// Return the current CPU's slab object.
-    #[eii(current_cpu_slab_impl)]
-    pub fn current_cpu_slab() -> &'static dyn crate::SlabTrait;
-
-    /// Return the owner slab for the given CPU.
-    #[eii(remote_slab_impl)]
-    pub fn remote_slab(cpu_idx: usize) -> &'static dyn crate::SlabTrait;
+    /// Return the system-global slab pool.
+    #[eii(slab_pool_impl)]
+    pub fn slab_pool() -> &'static dyn crate::SlabPoolTrait;
 }
 
 #[cfg(test)]
 mod test_eii_impls {
     use core::{alloc::Layout, ptr::NonNull};
 
-    use super::eii::{current_cpu_slab_impl, remote_slab_impl, virt_to_phys_impl};
-    use super::{
-        AllocError, AllocResult, SizeClass, SlabAllocResult, SlabDeallocResult, SlabTrait,
-    };
+    use super::eii::{slab_pool_impl, virt_to_phys_impl};
+    use super::{AllocError, AllocResult, SizeClass, SlabAllocResult, SlabPoolTrait, SlabTrait};
 
+    struct NullSlabPool;
     struct NullSlab;
 
     impl SlabTrait for NullSlab {
         fn cpu_id(&self) -> usize {
             0
+        }
+
+        fn page_size(&self) -> usize {
+            0x1000
         }
 
         fn alloc(&self, _layout: Layout) -> AllocResult<SlabAllocResult> {
@@ -62,28 +64,33 @@ mod test_eii_impls {
 
         fn add_slab(&self, _size_class: SizeClass, _base: usize, _bytes: usize) {}
 
-        fn dealloc_local(&self, _ptr: NonNull<u8>, _layout: Layout) -> SlabDeallocResult {
-            SlabDeallocResult::Done
+        fn dealloc_local(&self, _ptr: NonNull<u8>, _layout: Layout) -> super::SlabDeallocResult {
+            super::SlabDeallocResult::Done
         }
-
-        fn dealloc_remote(&self, _ptr: NonNull<u8>) {}
     }
 
     static NULL_SLAB: NullSlab = NullSlab;
+
+    impl SlabPoolTrait for NullSlabPool {
+        fn current_slab(&self) -> &dyn SlabTrait {
+            &NULL_SLAB
+        }
+
+        fn owner_slab(&self, _cpu_idx: usize) -> &dyn SlabTrait {
+            &NULL_SLAB
+        }
+    }
+
+    static NULL_SLAB_POOL: NullSlabPool = NullSlabPool;
 
     #[virt_to_phys_impl]
     fn test_virt_to_phys(vaddr: usize) -> usize {
         vaddr
     }
 
-    #[current_cpu_slab_impl]
-    fn test_current_cpu_slab() -> &'static dyn SlabTrait {
-        &NULL_SLAB
-    }
-
-    #[remote_slab_impl]
-    fn test_remote_slab(_cpu_idx: usize) -> &'static dyn SlabTrait {
-        &NULL_SLAB
+    #[slab_pool_impl]
+    fn test_slab_pool() -> &'static dyn SlabPoolTrait {
+        &NULL_SLAB_POOL
     }
 }
 

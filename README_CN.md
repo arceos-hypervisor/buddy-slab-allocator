@@ -21,12 +21,12 @@
 flowchart TD
     GA["GlobalAllocator"] --> B["SpinMutex<BuddyAllocator>"]
     GA --> EI["eii hooks"]
-    EI --> PCS["current_cpu_slab / remote_slab"]
+    EI --> SP["slab_pool()"]
 
     B --> PM["PageMeta[]"]
     B --> FL["按 order 的 free_lists"]
 
-    PCS --> SA["SlabAllocator"]
+    SP --> SA["SlabPoolTrait"]
     SA --> SC["9 个 SlabCache"]
     SC --> P["partial"]
     SC --> F["full"]
@@ -91,29 +91,27 @@ buddy-slab-allocator = "0.2.0"
 ```rust
 #![feature(extern_item_impls)]
 
-use buddy_slab_allocator::eii::{
-    current_cpu_slab_impl, remote_slab_impl, virt_to_phys_impl,
-};
-use buddy_slab_allocator::{GlobalAllocator, PerCpuSlab, SlabTrait};
+use buddy_slab_allocator::eii::{slab_pool_impl, virt_to_phys_impl};
+use buddy_slab_allocator::{GlobalAllocator, PerCpuSlab, SlabPoolTrait, StaticSlabPool};
 use core::alloc::Layout;
 
 const PAGE_SIZE: usize = 0x1000;
 
-static CPU_SLABS: [PerCpuSlab<PAGE_SIZE>; 1] = [PerCpuSlab::new(0)];
+fn current_cpu_id() -> usize {
+    0
+}
+
+static SLAB_POOL: StaticSlabPool<PAGE_SIZE, 1> =
+    StaticSlabPool::new([PerCpuSlab::new(0)], current_cpu_id);
 
 #[virt_to_phys_impl]
 fn virt_to_phys(vaddr: usize) -> usize {
     vaddr
 }
 
-#[current_cpu_slab_impl]
-fn current_cpu_slab() -> &'static dyn SlabTrait {
-    &CPU_SLABS[0]
-}
-
-#[remote_slab_impl]
-fn remote_slab(_cpu_idx: usize) -> &'static dyn SlabTrait {
-    &CPU_SLABS[0]
+#[slab_pool_impl]
+fn slab_pool() -> &'static dyn SlabPoolTrait {
+    &SLAB_POOL
 }
 
 let allocator = GlobalAllocator::<PAGE_SIZE>::new();
@@ -142,6 +140,8 @@ unsafe {
     allocator.add_region(extra_region).unwrap();
 }
 ```
+
+`GlobalAllocator` 按系统级单例分配器设计：同一时刻只应初始化一套正在使用的实例。
 
 ## 分别使用 Buddy 与 Slab
 
@@ -211,8 +211,14 @@ unsafe {
   `Allocated(ptr)` 或 `NeedsSlab { size_class, pages }`。
 - `SlabDeallocResult`
   `Done` 或 `FreeSlab { base, pages }`。
+- `SlabPoolTrait`
+  `GlobalAllocator` 使用的系统级 slab 池接口，暴露 object-safe 的
+  `current_slab()` / `owner_slab()` 原语，并提供 `alloc` / `add_slab` /
+  `dealloc` 默认路由。
+- `SlabPoolExt`
+  callback 风格辅助接口：`with_current_slab()` 和 `with_owner_slab()`。
 - `eii`
-  声明 `current_cpu_slab()`、`remote_slab()` 与 `virt_to_phys()`，供平台侧实现。
+  声明 `slab_pool()` 与 `virt_to_phys()`，供平台侧实现。
 
 `managed_bytes` 只统计可分配 heap，不包含 region 前缀 metadata。
 `allocated_bytes` 表示后端页占用，不是用户请求的 `layout.size()` 精确求和。

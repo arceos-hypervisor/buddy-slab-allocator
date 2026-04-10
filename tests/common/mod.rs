@@ -1,7 +1,8 @@
 #![allow(dead_code)]
 
-use buddy_slab_allocator::eii::{current_cpu_slab_impl, remote_slab_impl, virt_to_phys_impl};
-use buddy_slab_allocator::{GlobalAllocator, PerCpuSlab, SlabTrait};
+use buddy_slab_allocator::__reset_global_allocator_singleton_for_tests;
+use buddy_slab_allocator::eii::{slab_pool_impl, virt_to_phys_impl};
+use buddy_slab_allocator::{GlobalAllocator, PerCpuSlab, SlabPoolTrait};
 use core::ptr::NonNull;
 use rand::{SeedableRng, rngs::StdRng};
 use std::alloc::{Layout, alloc, dealloc};
@@ -23,9 +24,19 @@ pub struct GlobalTestContext {
     _guard: MutexGuard<'static, ()>,
 }
 
+struct TestSlabPool {
+    slabs: &'static [PerCpuSlab<TEST_PAGE_SIZE>],
+}
+
 fn global_test_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
+}
+
+impl Drop for GlobalTestContext {
+    fn drop(&mut self) {
+        __reset_global_allocator_singleton_for_tests();
+    }
 }
 
 fn test_cpu_slabs() -> &'static [PerCpuSlab<TEST_PAGE_SIZE>] {
@@ -48,20 +59,31 @@ fn reset_cpu_slabs(cpu_count: usize) {
     }
 }
 
+impl SlabPoolTrait for TestSlabPool {
+    fn current_slab(&self) -> &dyn buddy_slab_allocator::SlabTrait {
+        &self.slabs[CURRENT_CPU.with(|slot| slot.get())]
+    }
+
+    fn owner_slab(&self, cpu_idx: usize) -> &dyn buddy_slab_allocator::SlabTrait {
+        &self.slabs[cpu_idx]
+    }
+}
+
+fn test_slab_pool_ref() -> &'static TestSlabPool {
+    static POOL: OnceLock<TestSlabPool> = OnceLock::new();
+    POOL.get_or_init(|| TestSlabPool {
+        slabs: test_cpu_slabs(),
+    })
+}
+
 #[virt_to_phys_impl]
 fn test_virt_to_phys(vaddr: usize) -> usize {
     lowmem_map(vaddr)
 }
 
-#[current_cpu_slab_impl]
-fn test_current_cpu_slab() -> &'static dyn SlabTrait {
-    let cpu = CURRENT_CPU.with(|slot| slot.get());
-    &test_cpu_slabs()[cpu]
-}
-
-#[remote_slab_impl]
-fn test_remote_slab(cpu_idx: usize) -> &'static dyn SlabTrait {
-    &test_cpu_slabs()[cpu_idx]
+#[slab_pool_impl]
+fn test_slab_pool() -> &'static dyn SlabPoolTrait {
+    test_slab_pool_ref()
 }
 
 pub fn set_current_cpu(cpu: usize) {
@@ -117,15 +139,9 @@ pub fn init_global_slice<const PAGE_SIZE: usize>(
     region: &mut [u8],
     cpu_count: usize,
 ) -> GlobalTestContext {
-    assert_eq!(
-        PAGE_SIZE, TEST_PAGE_SIZE,
-        "test EII slab pool only supports PAGE_SIZE={TEST_PAGE_SIZE:#x}"
-    );
-    let guard = global_test_lock().lock().unwrap();
-    set_current_cpu(0);
-    reset_cpu_slabs(cpu_count);
+    let ctx = global_test_context::<PAGE_SIZE>(cpu_count);
     unsafe { allocator.init(region).unwrap() };
-    GlobalTestContext { _guard: guard }
+    ctx
 }
 
 pub fn init_global<const PAGE_SIZE: usize>(
@@ -134,6 +150,19 @@ pub fn init_global<const PAGE_SIZE: usize>(
     cpu_count: usize,
 ) -> GlobalTestContext {
     init_global_slice(allocator, region.as_mut_slice(), cpu_count)
+}
+
+pub fn global_test_context<const PAGE_SIZE: usize>(cpu_count: usize) -> GlobalTestContext {
+    assert_eq!(
+        PAGE_SIZE, TEST_PAGE_SIZE,
+        "test EII slab pool only supports PAGE_SIZE={TEST_PAGE_SIZE:#x}"
+    );
+    let guard = global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    set_current_cpu(0);
+    reset_cpu_slabs(cpu_count);
+    GlobalTestContext { _guard: guard }
 }
 
 pub fn count_free_pages<const PAGE_SIZE: usize>(allocator: &GlobalAllocator<PAGE_SIZE>) -> usize {

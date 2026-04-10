@@ -31,12 +31,14 @@
 ```mermaid
 flowchart TD
     GA["GlobalAllocator"] --> B["BuddyAllocator"]
-    GA --> PCS["per-CPU SlabAllocator array"]
-    GA --> OS["OsImpl"]
+    GA --> SP["SlabPoolTrait"]
+    GA --> EI["EII hooks"]
+    EI --> SP
+    EI --> V2P["virt_to_phys()"]
 
-    PCS --> SC8["SlabCache: 8B"]
-    PCS --> SC64["SlabCache: 64B"]
-    PCS --> SC2K["SlabCache: 2048B"]
+    SP --> SC8["SlabCache: 8B"]
+    SP --> SC64["SlabCache: 64B"]
+    SP --> SC2K["SlabCache: 2048B"]
 
     SC8 --> SPH["SlabPageHeader"]
     SC64 --> SPH
@@ -57,7 +59,7 @@ flowchart TD
 
 物理地址只在 `alloc_pages_lowmem()` 里参与判断：
 
-- 候选块的虚拟地址通过 `OsImpl::virt_to_phys()` 翻译成物理地址。
+- 候选块的虚拟地址通过 `eii::virt_to_phys()` 翻译成物理地址。
 - 只有物理地址低于 `4 GiB` 的块才会被当作 DMA32 候选。
 
 ### 2.2 容量统计语义
@@ -81,10 +83,10 @@ flowchart TD
 
 当前实现支持两种 region 进入 allocator 的方式：
 
-- `GlobalAllocator::init(region, cpu_count, os)`
-  注册首个 region，并初始化唯一一份 per-CPU slab 槽位。
+- `GlobalAllocator::init(region)`
+  注册首个 region；slab 池由外部通过 `eii::slab_pool()` 提供。
 - `GlobalAllocator::add_region(region)`
-  在运行时追加新的 region，只扩展 buddy 后端，不再重复创建 per-CPU slab。
+  在运行时追加新的 region，只扩展 buddy 后端。
 
 对 buddy 而言，每个 region 都会被拆成：
 
@@ -95,7 +97,6 @@ flowchart TD
 
 - `BuddySection`
 - `PageMeta[]`
-- `per_cpu_slabs: [SpinMutex<SlabAllocator>; cpu_count]`
 
 后续追加 region 的元数据前缀只包含：
 
@@ -107,11 +108,7 @@ flowchart LR
     A["region start"] --> B["aligned section_start"]
     B --> C["BuddySection"]
     C --> D["PageMeta array"]
-    D --> E{"first global region?"}
-    E -- Yes --> F["per-CPU SlabAllocator slots"]
-    E -- No --> G["no slab slots here"]
-    F --> H["padding to PAGE_SIZE"]
-    G --> H
+    D --> H["padding to PAGE_SIZE / granule"]
     H --> I["section heap start"]
     I --> J["managed heap of this section"]
 ```
@@ -120,12 +117,14 @@ flowchart LR
 
 `GlobalAllocator::init()` 的主要步骤如下：
 
-1. 根据 `region.len()` 和 `cpu_count` 计算首个 section 最多能管理多少页。
-2. 在 region 前缀预留 `BuddySection + PageMeta[] + per_cpu_slabs`。
+1. 根据 `region.len()` 计算首个 section 最多能管理多少页。
+2. 在 region 前缀预留 `BuddySection + PageMeta[]`。
 3. 选择一个页对齐的 section heap 起点。
 4. 将首个 section 注册进 `BuddyAllocator`。
-5. 原地构造每个 CPU 对应的 `SpinMutex<SlabAllocator>`。
-6. 将 `per_cpu_slabs`、`cpu_count`、`os` 写入 `GlobalAllocator`。
+5. 将 allocator 标记为已初始化。
+
+当前实现按“系统里只有唯一一套全局 allocator”建模；slab 池通过
+`eii::slab_pool()` 接入，而不是存放在 `GlobalAllocator` 内部。
 
 `GlobalAllocator::add_region()` 的步骤更简单：
 
@@ -140,7 +139,6 @@ flowchart LR
 
 - 不需要额外的启动期堆分配。
 - `BuddySection` 与 `PageMeta[]` 都跟随 region 自身生命周期。
-- `per_cpu_slabs` 的内存来源和被管理堆绑在一起，部署简单。
 - 不需要预先声明最大 section 数量。
 
 代价是：
@@ -368,23 +366,21 @@ flowchart TD
 sequenceDiagram
     participant Caller
     participant GA as GlobalAllocator
-    participant S as per-CPU SlabAllocator
+    participant P as SlabPoolTrait
     participant B as BuddyAllocator
 
     Caller->>GA: alloc(layout)
-    GA->>GA: current_cpu_idx()
-    GA->>S: lock + alloc(layout)
+    GA->>P: alloc(layout)
     alt Slab 命中
-        S-->>GA: Allocated(ptr)
+        P-->>GA: Allocated(ptr)
         GA-->>Caller: ptr
     else 需要新 slab
-        S-->>GA: NeedsSlab(size_class, pages)
-        GA->>S: drop lock
+        P-->>GA: NeedsSlab(size_class, pages)
         GA->>B: alloc_pages(pages, slab_bytes)
         GA->>B: set_page_flags(addr, Slab)
-        GA->>S: lock + add_slab(...)
-        GA->>S: alloc(layout)
-        S-->>GA: Allocated(ptr)
+        GA->>P: add_slab(...)
+        GA->>P: alloc(layout)
+        P-->>GA: Allocated(ptr)
         GA-->>Caller: ptr
     end
 ```
@@ -596,7 +592,7 @@ per-CPU slab 的好处是：
 如果想快速建立整体理解，建议按下面顺序读：
 
 1. `src/lib.rs`
-   先看公开模块和 `OsImpl`。
+   先看公开模块、EII、`SlabPoolTrait` 与 `SlabPoolExt`。
 2. `src/global.rs`
    先理解门面层如何在 buddy/slab 间路由。
 3. `src/buddy/mod.rs`

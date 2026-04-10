@@ -21,12 +21,12 @@ The design details are documented in [docs/design.md](docs/design.md).
 flowchart TD
     GA["GlobalAllocator"] --> B["SpinMutex<BuddyAllocator>"]
     GA --> EI["eii hooks"]
-    EI --> PCS["current_cpu_slab / remote_slab"]
+    EI --> SP["slab_pool()"]
 
     B --> PM["PageMeta[]"]
     B --> FL["free_lists by order"]
 
-    PCS --> SA["SlabAllocator"]
+    SP --> SA["SlabPoolTrait"]
     SA --> SC["SlabCache x 9"]
     SC --> P["partial"]
     SC --> F["full"]
@@ -91,29 +91,27 @@ buddy-slab-allocator = "0.2.0"
 ```rust
 #![feature(extern_item_impls)]
 
-use buddy_slab_allocator::eii::{
-    current_cpu_slab_impl, remote_slab_impl, virt_to_phys_impl,
-};
-use buddy_slab_allocator::{GlobalAllocator, PerCpuSlab, SlabTrait};
+use buddy_slab_allocator::eii::{slab_pool_impl, virt_to_phys_impl};
+use buddy_slab_allocator::{GlobalAllocator, PerCpuSlab, SlabPoolTrait, StaticSlabPool};
 use core::alloc::Layout;
 
 const PAGE_SIZE: usize = 0x1000;
 
-static CPU_SLABS: [PerCpuSlab<PAGE_SIZE>; 1] = [PerCpuSlab::new(0)];
+fn current_cpu_id() -> usize {
+    0
+}
+
+static SLAB_POOL: StaticSlabPool<PAGE_SIZE, 1> =
+    StaticSlabPool::new([PerCpuSlab::new(0)], current_cpu_id);
 
 #[virt_to_phys_impl]
 fn virt_to_phys(vaddr: usize) -> usize {
     vaddr
 }
 
-#[current_cpu_slab_impl]
-fn current_cpu_slab() -> &'static dyn SlabTrait {
-    &CPU_SLABS[0]
-}
-
-#[remote_slab_impl]
-fn remote_slab(_cpu_idx: usize) -> &'static dyn SlabTrait {
-    &CPU_SLABS[0]
+#[slab_pool_impl]
+fn slab_pool() -> &'static dyn SlabPoolTrait {
+    &SLAB_POOL
 }
 
 let allocator = GlobalAllocator::<PAGE_SIZE>::new();
@@ -143,6 +141,9 @@ unsafe {
     allocator.add_region(extra_region).unwrap();
 }
 ```
+
+`GlobalAllocator` is designed as a singleton-style system allocator: only one live
+instance should be initialized at a time.
 
 ## Using Buddy and Slab separately
 
@@ -212,8 +213,14 @@ unsafe {
   `Allocated(ptr)` or `NeedsSlab { size_class, pages }`.
 - `SlabDeallocResult`
   `Done` or `FreeSlab { base, pages }`.
+- `SlabPoolTrait`
+  System-global slab pool interface used by `GlobalAllocator`, exposing
+  object-safe `current_slab()` / `owner_slab()` primitives with default
+  routing for `alloc` / `add_slab` / `dealloc`.
+- `SlabPoolExt`
+  Callback-style helpers: `with_current_slab()` and `with_owner_slab()`.
 - `eii`
-  Declares `current_cpu_slab()`, `remote_slab()`, and `virt_to_phys()` for platform integration.
+  Declares `slab_pool()` and `virt_to_phys()` for platform integration.
 
 `managed_bytes` counts only allocatable heap bytes and excludes region-prefix metadata.
 `allocated_bytes` is backend page occupancy, not the exact sum of requested `layout.size()`.
